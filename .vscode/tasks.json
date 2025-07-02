@@ -1,0 +1,23 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Run Flask Backend",
+      "type": "shell",
+      "command": "/Users/admin/.pyenv/versions/3.11.9/bin/python",
+      "args": ["app.py"],
+      "group": "build",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "Open Frontend in Browser",
+      "type": "shell",
+      "command": "open",
+      "args": ["http://127.0.0.1:5000"],
+      "group": "build",
+      "isBackground": false,
+      "problemMatcher": []
+    }
+  ]
+}
