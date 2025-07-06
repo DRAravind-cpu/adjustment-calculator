@@ -531,40 +531,26 @@ def index():
             pdf.set_font('Arial', '', 11)
             pdf.multi_cell(0, 8, "1. For each 15-minute slot, generated energy (MW) is converted to kWh (MW * 250).\n2. T&D loss is deducted: After_Loss = Generated_kWh * (1 - T&D loss / 100).\n3. Consumed energy is multiplied by the entered multiplication factor.\n4. For each slot, Excess = Generated_After_Loss - Consumed_Energy.\n5. The table below shows the slot-wise calculation and excess.")
             pdf.ln(2)
-            # Define TOD descriptions for reference
-            tod_descriptions = {
-                'C1': 'Morning Peak',
-                'C2': 'Evening Peak',
-                'C4': 'Normal Hours',
-                'C5': 'Night Hours',
-                'Unknown': 'Unknown Time Slot'
-            }
-            
-            # 15-min slot-wise table with improved layout
+            # 15-min slot-wise table (existing)
             pdf.set_font('Arial', 'B', 10)
-            pdf.cell(20, 8, 'Date', 1)
+            pdf.cell(25, 8, 'Date', 1)
             pdf.cell(25, 8, 'Time', 1)
-            pdf.cell(60, 8, 'TOD Category & Description', 1)
-            pdf.cell(25, 8, 'Gen. After Loss', 1)
-            pdf.cell(25, 8, 'Consumed', 1)
-            pdf.cell(25, 8, 'Excess', 1)
-            pdf.cell(10, 8, 'Miss', 1)
+            pdf.cell(25, 8, 'TOD', 1)
+            pdf.cell(30, 8, 'Gen. After Loss', 1)
+            pdf.cell(30, 8, 'Consumed', 1)
+            pdf.cell(30, 8, 'Excess', 1)
+            pdf.cell(25, 8, 'Missing Info', 1)
             pdf.ln()
-            pdf.set_font('Arial', '', 9)  # Slightly smaller font for better fit
+            pdf.set_font('Arial', '', 10)
             for idx, row in pdf_data.iterrows():
-                pdf.cell(20, 8, safe_date_str(row['Slot_Date']), 1)
+                pdf.cell(25, 8, safe_date_str(row['Slot_Date']), 1)
                 pdf.cell(25, 8, format_time(row['Slot_Time']), 1)
-                
-                # Combine TOD category and description
-                tod_cat = row.get('TOD_Category', '')
-                tod_desc = tod_descriptions.get(tod_cat, '')
-                combined_tod = f"{tod_cat}: {tod_desc}" if tod_cat else ""
-                pdf.cell(60, 8, combined_tod, 1)
-                
-                pdf.cell(25, 8, f"{row['After_Loss']:.4f}", 1)
-                pdf.cell(25, 8, f"{row['Energy_kWh_cons']:.4f}", 1)
-                pdf.cell(25, 8, f"{row['Excess']:.4f}", 1)
-                pdf.cell(10, 8, row.get('Missing_Info', ''), 1)
+                pdf.cell(25, 8, row.get('TOD_Category', ''), 1)
+                pdf.cell(30, 8, f"{row['After_Loss']:.4f}", 1)
+                pdf.cell(30, 8, f"{row['Energy_kWh_cons']:.4f}", 1)
+                pdf.cell(30, 8, f"{row['Excess']:.4f}", 1)
+                # Reduce width of Missing Info column for better alignment
+                pdf.cell(25, 8, row.get('Missing_Info', ''), 1)
                 pdf.ln()
             pdf.ln(2)
             # Show error/warning message in PDF if present
@@ -654,49 +640,21 @@ def index():
             cross_subsidy_surcharge = total_excess * 1.92
             pdf.cell(0, 8, f"8. Cross Subsidy Surcharge: Total Excess ({total_excess:.4f} kWh) x Rs.1.92 = Rs.{cross_subsidy_surcharge:.2f}", ln=True)
             
-            # New formula for wheeling charges
-            # Step 1: Calculate x = (Total excess energy * loss % / (100 - loss %))
-            loss_percentage = t_and_d_loss  # Using the T&D loss percentage from form input
-            x_value = (total_excess * loss_percentage) / (100 - loss_percentage)
-            
-            # Step 2: Calculate y = (total excess energy * loss % / x) + total excess energy
-            y_value = (total_excess * loss_percentage / x_value) + total_excess if x_value != 0 else total_excess
-            
-            # Step 3: Calculate wheeling charges = y * 1.04
-            wheeling_charges = y_value * 1.04
-            
-            pdf.cell(0, 8, f"9a. Wheeling Charges Step 1: [{total_excess:.4f} x {loss_percentage:.2f}% / (100-{loss_percentage:.2f}%)] = {x_value:.4f}", ln=True)
-            pdf.cell(0, 8, f"9b. Wheeling Charges Step 2: [({total_excess:.4f} x {loss_percentage:.2f}% / {x_value:.4f}) + {total_excess:.4f}] x 1.04 = Rs.{wheeling_charges:.2f}", ln=True)
+            wheeling_charges = cross_subsidy_surcharge * 1.04
+            pdf.cell(0, 8, f"9. Wheeling Charges: Cross Subsidy Surcharge (Rs.{cross_subsidy_surcharge:.2f}) x 1.04 = Rs.{wheeling_charges:.2f}", ln=True)
             
             # Calculate final amount to be collected
             final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges)
             pdf.set_font('Arial', 'B', 10)
             pdf.cell(0, 10, f"10. Total Amount to be Collected: Rs.{total_with_etax:.2f} - (Rs.{etax_on_iex:.2f} + Rs.{cross_subsidy_surcharge:.2f} + Rs.{wheeling_charges:.2f}) = Rs.{final_amount:.2f}", ln=True)
             
-            try:
-                print("DEBUG: Generating PDF output in generate_pdf function...")
-                pdf_output = io.BytesIO()
-                pdf_bytes = pdf.output(dest='S')
-                if isinstance(pdf_bytes, str):
-                    print("DEBUG: PDF bytes is a string, encoding to latin1")
-                    pdf_bytes = pdf_bytes.encode('latin1')
-                pdf_output.write(pdf_bytes)
-                pdf_output.seek(0)
-                print("DEBUG: PDF generation successful")
-                return pdf_output
-            except UnicodeEncodeError as e:
-                print(f"ERROR: Unicode encoding error in generate_pdf: {e}")
-                # Find the problematic character
-                if isinstance(e, UnicodeEncodeError):
-                    bad_char = e.object[e.start:e.end]
-                    print(f"ERROR: Problematic character: '{bad_char}' (Unicode: U+{ord(bad_char[0]):04X})")
-                    print(f"ERROR: Position in string: {e.start}")
-                    # Get some context around the error
-                    context_start = max(0, e.start - 20)
-                    context_end = min(len(e.object), e.end + 20)
-                    context = e.object[context_start:context_end]
-                    print(f"ERROR: Context: '...{context}...'")
-                raise
+            pdf_output = io.BytesIO()
+            pdf_bytes = pdf.output(dest='S')
+            if isinstance(pdf_bytes, str):
+                pdf_bytes = pdf_bytes.encode('latin1')
+            pdf_output.write(pdf_bytes)
+            pdf_output.seek(0)
+            return pdf_output
 
         # Generate PDFs as per user selection
         pdfs = []
@@ -867,49 +825,21 @@ def index():
             cross_subsidy_surcharge = total_excess * 1.92
             pdf.cell(0, 8, f"8. Cross Subsidy Surcharge: Total Excess ({total_excess:.4f} kWh) x Rs.1.92 = Rs.{cross_subsidy_surcharge:.2f}", ln=True)
             
-            # New formula for wheeling charges
-            # Step 1: Calculate x = (Total excess energy * loss % / (100 - loss %))
-            loss_percentage = t_and_d_loss  # Using the T&D loss percentage from form input
-            x_value = (total_excess * loss_percentage) / (100 - loss_percentage)
-            
-            # Step 2: Calculate y = (total excess energy * loss % / x) + total excess energy
-            y_value = (total_excess * loss_percentage / x_value) + total_excess if x_value != 0 else total_excess
-            
-            # Step 3: Calculate wheeling charges = y * 1.04
-            wheeling_charges = y_value * 1.04
-            
-            pdf.cell(0, 8, f"9a. Wheeling Charges Step 1: [{total_excess:.4f} x {loss_percentage:.2f}% / (100-{loss_percentage:.2f}%)] = {x_value:.4f}", ln=True)
-            pdf.cell(0, 8, f"9b. Wheeling Charges Step 2: [({total_excess:.4f} x {loss_percentage:.2f}% / {x_value:.4f}) + {total_excess:.4f}] x 1.04 = Rs.{wheeling_charges:.2f}", ln=True)
+            wheeling_charges = cross_subsidy_surcharge * 1.04
+            pdf.cell(0, 8, f"9. Wheeling Charges: Cross Subsidy Surcharge (Rs.{cross_subsidy_surcharge:.2f}) x 1.04 = Rs.{wheeling_charges:.2f}", ln=True)
             
             # Calculate final amount to be collected
             final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges)
             pdf.set_font('Arial', 'B', 10)
             pdf.cell(0, 10, f"10. Total Amount to be Collected: Rs.{total_with_etax:.2f} - (Rs.{etax_on_iex:.2f} + Rs.{cross_subsidy_surcharge:.2f} + Rs.{wheeling_charges:.2f}) = Rs.{final_amount:.2f}", ln=True)
             
-            try:
-                print("DEBUG: Generating PDF output in generate_daywise_pdf function...")
-                pdf_output = io.BytesIO()
-                pdf_bytes = pdf.output(dest='S')
-                if isinstance(pdf_bytes, str):
-                    print("DEBUG: PDF bytes is a string, encoding to latin1")
-                    pdf_bytes = pdf_bytes.encode('latin1')
-                pdf_output.write(pdf_bytes)
-                pdf_output.seek(0)
-                print("DEBUG: PDF generation successful")
-                return pdf_output
-            except UnicodeEncodeError as e:
-                print(f"ERROR: Unicode encoding error in generate_daywise_pdf: {e}")
-                # Find the problematic character
-                if isinstance(e, UnicodeEncodeError):
-                    bad_char = e.object[e.start:e.end]
-                    print(f"ERROR: Problematic character: '{bad_char}' (Unicode: U+{ord(bad_char[0]):04X})")
-                    print(f"ERROR: Position in string: {e.start}")
-                    # Get some context around the error
-                    context_start = max(0, e.start - 20)
-                    context_end = min(len(e.object), e.end + 20)
-                    context = e.object[context_start:context_end]
-                    print(f"ERROR: Context: '...{context}...'")
-                raise
+            pdf_output = io.BytesIO()
+            pdf_bytes = pdf.output(dest='S')
+            if isinstance(pdf_bytes, str):
+                pdf_bytes = pdf_bytes.encode('latin1')
+            pdf_output.write(pdf_bytes)
+            pdf_output.seek(0)
+            return pdf_output
 
         # Defensive: If no PDF options are selected, default to generating 'all slots' PDF
         if not (show_excess_only or show_all_slots or show_daywise):

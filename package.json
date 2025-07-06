@@ -1,0 +1,11 @@
+{
+  "name": "energy-adjustment",
+  "version": "1.0.0",
+  "description": "Energy Adjustment Calculator",
+  "main": "app.py",
+  "scripts": {
+    "start": "python app.py"
+  },
+  "author": "Er.Aravind MRT VREDC",
+  "license": "MIT"
+}

@@ -8,26 +8,36 @@
 </head>
 <body>
 <div class="container mt-5">
-    <h2 class="mb-4">Energy Adjustment Calculator</h2>
+    <div class="row">
+        <div class="col">
+            <h2 class="mb-4">Energy Adjustment Calculator</h2>
+        </div>
+        <div class="col-auto">
+            <p class="text-end fw-bold">Author: Er.Aravind MRT VREDC</p>
+        </div>
+    </div>
     {% if error %}
     <div class="alert alert-danger" role="alert">
         {{ error }}
     </div>
     {% endif %}
-    <form method="POST" enctype="multipart/form-data">
+    <form method="POST" enctype="multipart/form-data" onsubmit="return validateForm()">
         <div class="mb-3">
             <label class="form-label">PDF Output Options</label><br>
             <div class="form-check form-check-inline">
-                <input class="form-check-input" type="checkbox" id="show_excess_only" name="show_excess_only" value="1" checked>
+                <input class="form-check-input pdf-option" type="checkbox" id="show_excess_only" name="show_excess_only" value="1" checked>
                 <label class="form-check-label" for="show_excess_only">Show only slots with excess (loss)</label>
             </div>
             <div class="form-check form-check-inline">
-                <input class="form-check-input" type="checkbox" id="show_all_slots" name="show_all_slots" value="1">
+                <input class="form-check-input pdf-option" type="checkbox" id="show_all_slots" name="show_all_slots" value="1">
                 <label class="form-check-label" for="show_all_slots">Show all slots (15-min slot-wise)</label>
             </div>
             <div class="form-check form-check-inline">
-                <input class="form-check-input" type="checkbox" id="show_daywise" name="show_daywise" value="1">
+                <input class="form-check-input pdf-option" type="checkbox" id="show_daywise" name="show_daywise" value="1">
                 <label class="form-check-label" for="show_daywise">Show day-wise summary (all days in month)</label>
+            </div>
+            <div id="pdf-options-error" class="text-danger" style="display: none;">
+                Please select at least one PDF output option.
             </div>
         </div>
         <div class="mb-3">
@@ -69,19 +79,50 @@
             </select>
         </div>
         <div class="mb-3">
-            <label for="year" class="form-label">Year</label>
-            <input type="number" min="2000" max="2100" class="form-control" id="year" name="year" required>
+            <label for="year" class="form-label">Year (optional if auto-detect is enabled)</label>
+            <input type="number" min="2000" max="2100" class="form-control" id="year" name="year">
         </div>
         <div class="mb-3">
-            <label for="generated_file" class="form-label">Generated Energy Excel (MW)</label>
-            <input type="file" class="form-control" id="generated_file" name="generated_file" accept=".xlsx,.xls" required>
+            <label for="generated_files" class="form-label">Generated Energy Excel Files (MW)</label>
+            <input type="file" class="form-control" id="generated_files" name="generated_files" accept=".xlsx,.xls" multiple required>
+            <small class="form-text text-muted">You can select multiple files by holding Ctrl (or Cmd on Mac) while selecting files.</small>
         </div>
         <div class="mb-3">
-            <label for="consumed_file" class="form-label">Consumed Energy Excel (kWh)</label>
-            <input type="file" class="form-control" id="consumed_file" name="consumed_file" accept=".xlsx,.xls" required>
+            <label for="consumed_files" class="form-label">Consumed Energy Excel Files (kWh)</label>
+            <input type="file" class="form-control" id="consumed_files" name="consumed_files" accept=".xlsx,.xls" multiple required>
+            <small class="form-text text-muted">You can select multiple files by holding Ctrl (or Cmd on Mac) while selecting files.</small>
+        </div>
+        <div class="form-check mb-3">
+            <input class="form-check-input" type="checkbox" id="auto_detect_month" name="auto_detect_month" value="1" checked>
+            <label class="form-check-label" for="auto_detect_month">Auto-detect month and year from files</label>
         </div>
         <button type="submit" class="btn btn-primary">Generate PDF Report</button>
     </form>
 </div>
+
+<script>
+function validateForm() {
+    // Check if at least one PDF option is selected
+    var pdfOptions = document.querySelectorAll('.pdf-option:checked');
+    if (pdfOptions.length === 0) {
+        document.getElementById('pdf-options-error').style.display = 'block';
+        return false;
+    }
+    document.getElementById('pdf-options-error').style.display = 'none';
+    return true;
+}
+
+// Add event listeners to PDF option checkboxes
+document.addEventListener('DOMContentLoaded', function() {
+    var pdfOptions = document.querySelectorAll('.pdf-option');
+    pdfOptions.forEach(function(option) {
+        option.addEventListener('change', function() {
+            if (document.querySelectorAll('.pdf-option:checked').length > 0) {
+                document.getElementById('pdf-options-error').style.display = 'none';
+            }
+        });
+    });
+});
+</script>
 </body>
 </html>
