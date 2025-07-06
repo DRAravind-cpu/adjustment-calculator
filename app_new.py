@@ -7,7 +7,8 @@ import os
 # Helper function to add TOD summary table with consistent formatting
 def add_tod_summary_table(pdf, pdf_data):
     # Define TOD descriptions
-    tod_descriptions = {
+    # TOD descriptions with time ranges removed for better readability
+            tod_descriptions = {
         'C1': 'Morning Peak',
         'C2': 'Evening Peak',
         'C4': 'Normal Hours',
@@ -571,6 +572,7 @@ def index():
             pdf.multi_cell(0, 8, "1. For each 15-minute slot, generated energy (MW) is converted to kWh (MW * 250).\n2. T&D loss is deducted: After_Loss = Generated_kWh * (1 - T&D loss / 100).\n3. Consumed energy is multiplied by the entered multiplication factor.\n4. For each slot, Excess = Generated_After_Loss - Consumed_Energy.\n5. The table below shows the slot-wise calculation and excess.")
             pdf.ln(2)
             # Define TOD descriptions for reference
+            # TOD descriptions with time ranges removed for better readability
             tod_descriptions = {
                 'C1': 'Morning Peak',
                 'C2': 'Evening Peak',
@@ -637,6 +639,7 @@ def index():
             # Get TOD-wise excess from the dataframe
             tod_excess = pdf_data.groupby('TOD_Category')['Excess'].sum().reset_index()
             
+            # TOD descriptions with time ranges removed for better readability
             tod_descriptions = {
                 'C1': 'Morning Peak',
                 'C2': 'Evening Peak',
@@ -850,6 +853,7 @@ def index():
             # Get TOD-wise excess from the dataframe
             tod_excess = pdf_data.groupby('TOD_Category')['Excess'].sum().reset_index()
             
+            # TOD descriptions with time ranges removed for better readability
             tod_descriptions = {
                 'C1': 'Morning Peak',
                 'C2': 'Evening Peak',

@@ -19,7 +19,7 @@ pattern1 = r"""            # Add TOD-wise excess energy breakdown
             # Get TOD-wise excess from the dataframe
             tod_excess = pdf_data\.groupby\('TOD_Category'\)\['Excess'\]\.sum\(\)\.reset_index\(\)
             
-            tod_descriptions = \{
+            # TOD descriptions with time ranges removed for better readability\n            tod_descriptions = \{
                 'C1': 'Morning Peak',
                 'C2': 'Evening Peak',
                 'C4': 'Normal Hours',
@@ -54,7 +54,7 @@ pattern2 = r"""            # Add TOD-wise excess energy breakdown
             # Get TOD-wise excess from the dataframe
             tod_excess = pdf_data\.groupby\('TOD_Category'\)\['Excess'\]\.sum\(\)\.reset_index\(\)
             
-            tod_descriptions = \{
+            # TOD descriptions with time ranges removed for better readability\n            tod_descriptions = \{
                 'C1': 'Morning Peak',
                 'C2': 'Evening Peak',
                 'C4': 'Normal Hours',

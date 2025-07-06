@@ -1,4 +1,5 @@
 # Energy Adjustment Web Application
+## TOD Category Description Update
 
 This project is a Flask-based web application that allows users to:
 - Upload two Excel files: one for generated energy (in MW) and one for consumed energy (in kWh)
@@ -17,3 +18,6 @@ This project is a Flask-based web application that allows users to:
 ---
 
 This README will be updated with more detailed instructions after the code is generated.
+
+## Recent Updates
+- Removed time ranges in parentheses from TOD Category descriptions to improve PDF readability

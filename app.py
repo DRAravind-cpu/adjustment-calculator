@@ -531,7 +531,7 @@ def index():
             pdf.set_font('Arial', '', 11)
             pdf.multi_cell(0, 8, "1. For each 15-minute slot, generated energy (MW) is converted to kWh (MW * 250).\n2. T&D loss is deducted: After_Loss = Generated_kWh * (1 - T&D loss / 100).\n3. Consumed energy is multiplied by the entered multiplication factor.\n4. For each slot, Excess = Generated_After_Loss - Consumed_Energy.\n5. The table below shows the slot-wise calculation and excess.")
             pdf.ln(2)
-            # Define TOD descriptions for reference
+            # Define TOD descriptions for reference (time ranges removed for better readability)
             tod_descriptions = {
                 'C1': 'Morning Peak',
                 'C2': 'Evening Peak',

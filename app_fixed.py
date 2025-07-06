@@ -584,6 +584,7 @@ def index():
             # Get TOD-wise excess from the dataframe
             tod_excess = pdf_data.groupby('TOD_Category')['Excess'].sum().reset_index()
             
+            # TOD descriptions with time ranges removed for better readability
             tod_descriptions = {
                 'C1': 'Morning Peak',
                 'C2': 'Evening Peak',
@@ -769,6 +770,7 @@ def index():
             # Get TOD-wise excess from the dataframe
             tod_excess = pdf_data.groupby('TOD_Category')['Excess'].sum().reset_index()
             
+            # TOD descriptions with time ranges removed for better readability
             tod_descriptions = {
                 'C1': 'Morning Peak',
                 'C2': 'Evening Peak',
