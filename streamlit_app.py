@@ -13,7 +13,7 @@ col1, col2 = st.columns([3, 1])
 with col1:
     st.title('Energy Adjustment Calculator (Streamlit)')
 with col2:
-    st.markdown('<p style="text-align: right; font-weight: bold; margin-top: 20px;">Author: VREDC</p>', unsafe_allow_html=True)
+    st.markdown('<p style="text-align: right; font-weight: bold; margin-top: 20px;">Author: Er.Aravind MRT VREDC</p>', unsafe_allow_html=True)
 
 st.markdown('Upload your generated and consumed energy Excel files, enter parameters, and download the PDF report.')
 
