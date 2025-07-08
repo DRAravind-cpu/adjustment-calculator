@@ -93,16 +93,24 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
         elif len(unique_months) > 1 and not month:
             month = str(gen_df['Date'].dt.month.value_counts().idxmax())
         if len(unique_years) == 1 and not year:
-            year = str(unique_years[0])
+            # Convert to integer first to remove any decimal part
+            year = str(int(unique_years[0]))
         elif len(unique_years) > 1 and not year:
-            year = str(gen_df['Date'].dt.year.value_counts().idxmax())
+            # Convert to integer first to remove any decimal part
+            year = str(int(gen_df['Date'].dt.year.value_counts().idxmax()))
         auto_detect_info = f"Auto-detected from {len(generated_files)} generated and {len(consumed_files)} consumed files"
         st.info(f"Auto-detected Month: {get_month_name(month)}, Year: {year}")
 
     filtered_gen = gen_df.copy()
     if year and month:
-        year_int, month_int = int(year), int(month)
-        start_date = pd.Timestamp(year_int, month_int, 1)
+        try:
+            # Handle potential float strings like '2025.0'
+            year_int = int(float(year))
+            month_int = int(float(month))
+            start_date = pd.Timestamp(year_int, month_int, 1)
+        except ValueError as e:
+            st.error(f"Invalid year or month format: {e}")
+            return None, f"Error: Invalid year '{year}' or month '{month}' format", None
         end_of_month = start_date + pd.offsets.MonthEnd(1)
         end_date = pd.Timestamp(end_of_month.year, end_of_month.month, end_of_month.day, 23, 45)
 
@@ -168,8 +176,14 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
 
     filtered_cons = cons_df.copy()
     if year and month:
-        year_int, month_int = int(year), int(month)
-        start_date = pd.Timestamp(year_int, month_int, 1)
+        try:
+            # Handle potential float strings like '2025.0'
+            year_int = int(float(year))
+            month_int = int(float(month))
+            start_date = pd.Timestamp(year_int, month_int, 1)
+        except ValueError as e:
+            st.error(f"Invalid year or month format: {e}")
+            return None, f"Error: Invalid year '{year}' or month '{month}' format", None
         end_of_month = start_date + pd.offsets.MonthEnd(1)
         end_date = pd.Timestamp(end_of_month.year, end_of_month.month, end_of_month.day, 23, 45)
         
