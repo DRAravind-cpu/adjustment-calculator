@@ -273,7 +273,7 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
     unique_days_cons_full = cons_df['Slot_Date'].nunique()
 
     # --- PDF Generation Functions ---
-    def generate_pdf(pdf_data, filename):
+    def generate_pdf(pdf_data, filename, use_total_consumed=None):
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font('Arial', 'B', 16)
@@ -282,6 +282,7 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
         pdf.cell(0, 10, f'Consumer Number: {consumer_number}', ln=True)
         pdf.cell(0, 10, f'Consumer Name: {consumer_name}', ln=True)
         pdf.cell(0, 10, f'T&D Loss (%): {t_and_d_loss}', ln=True)
+        pdf.cell(0, 10, f'Multiplication Factor (Consumed Energy): {multiplication_factor}', ln=True)
         if month: pdf.cell(0, 10, f'Month: {get_month_name(month)}', ln=True)
         if year: pdf.cell(0, 10, f'Year: {year}', ln=True)
         if auto_detect_info:
@@ -316,7 +317,51 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
         # Summary
         pdf.ln(5)
         pdf.set_font('Arial', 'B', 12)
+        # If use_total_consumed is provided, use it instead of calculating from pdf_data
+        # This ensures consistency across all PDFs
+        displayed_total_consumed = use_total_consumed if use_total_consumed is not None else pdf_data['Energy_kWh_cons'].sum()
+        
+        # Complete calculation details matching the Flask app
+        pdf.cell(0, 10, f'Sum of Injection (Generated before Loss, kWh): {sum_injection:.4f}', ln=True)
+        pdf.cell(0, 10, f'Total Generated Energy after Loss (kWh): {total_generated_after_loss:.4f}', ln=True)
+        pdf.cell(0, 10, f'Comparison (Injection - After Loss): {comparison:.4f}', ln=True)
+        pdf.cell(0, 10, f'Total Consumed Energy (kWh, after multiplication): {displayed_total_consumed:.4f}', ln=True)
         pdf.cell(0, 10, f'Total Excess Energy (kWh): {total_excess:.4f}', ln=True)
+        pdf.cell(0, 10, f'Unique Days Used (Generated): {unique_days_gen_full}', ln=True)
+        pdf.cell(0, 10, f'Unique Days Used (Consumed): {unique_days_cons_full}', ln=True)
+        pdf.cell(0, 10, f'Status: {excess_status}', ln=True)
+        
+        # Add TOD-wise excess energy breakdown
+        pdf.ln(5)
+        pdf.set_font('Arial', 'B', 12)
+        pdf.cell(0, 10, 'TOD-wise Excess Energy Breakdown:', ln=True)
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell(40, 8, 'TOD Category', 1)
+        pdf.cell(40, 8, 'Description', 1)
+        pdf.cell(40, 8, 'Excess Energy (kWh)', 1)
+        pdf.ln()
+        pdf.set_font('Arial', '', 10)
+        
+        # Get TOD-wise excess from the dataframe
+        tod_excess = pdf_data.groupby('TOD_Category')['Excess'].sum().reset_index()
+        
+        # TOD descriptions with time ranges removed for better readability
+        tod_descriptions = {
+            'C1': 'Morning Peak',
+            'C2': 'Evening Peak',
+            'C4': 'Normal Hours',
+            'C5': 'Night Hours',
+            'Unknown': 'Unknown Time Slot'
+        }
+        
+        for _, row in tod_excess.iterrows():
+            category = row['TOD_Category']
+            description = tod_descriptions.get(category, 'Unknown')
+            excess = row['Excess']
+            pdf.cell(40, 8, category, 1)
+            pdf.cell(40, 8, description, 1)
+            pdf.cell(40, 8, f"{excess:.4f}", 1)
+            pdf.ln()
         
         # Financials
         pdf.ln(5)
@@ -349,6 +394,8 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
         pdf.set_font('Arial', '', 12)
         pdf.cell(0, 10, f'Consumer Number: {consumer_number}', ln=True)
         pdf.cell(0, 10, f'Consumer Name: {consumer_name}', ln=True)
+        pdf.cell(0, 10, f'T&D Loss (%): {t_and_d_loss}', ln=True)
+        pdf.cell(0, 10, f'Multiplication Factor (Consumed Energy): {multiplication_factor}', ln=True)
         if month: pdf.cell(0, 10, f'Month: {get_month_name(month)}', ln=True)
         if year: pdf.cell(0, 10, f'Year: {year}', ln=True)
 
@@ -378,7 +425,48 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
         # Summary and Financials (same as other PDF)
         pdf.ln(5)
         pdf.set_font('Arial', 'B', 12)
+        # Complete calculation details matching the Flask app
+        pdf.cell(0, 10, f'Sum of Injection (Generated before Loss, kWh): {sum_injection:.4f}', ln=True)
+        pdf.cell(0, 10, f'Total Generated Energy after Loss (kWh): {total_generated_after_loss:.4f}', ln=True)
+        pdf.cell(0, 10, f'Comparison (Injection - After Loss): {comparison:.4f}', ln=True)
+        pdf.cell(0, 10, f'Total Consumed Energy (kWh, after multiplication): {total_consumed:.4f}', ln=True)
         pdf.cell(0, 10, f'Total Excess Energy (kWh): {total_excess:.4f}', ln=True)
+        pdf.cell(0, 10, f'Unique Days Used (Generated): {unique_days_gen_full}', ln=True)
+        pdf.cell(0, 10, f'Unique Days Used (Consumed): {unique_days_cons_full}', ln=True)
+        pdf.cell(0, 10, f'Status: {excess_status}', ln=True)
+        
+        # Add TOD-wise excess energy breakdown
+        pdf.ln(5)
+        pdf.set_font('Arial', 'B', 12)
+        pdf.cell(0, 10, 'TOD-wise Excess Energy Breakdown:', ln=True)
+        pdf.set_font('Arial', 'B', 10)
+        pdf.cell(40, 8, 'TOD Category', 1)
+        pdf.cell(40, 8, 'Description', 1)
+        pdf.cell(40, 8, 'Excess Energy (kWh)', 1)
+        pdf.ln()
+        pdf.set_font('Arial', '', 10)
+        
+        # Get TOD-wise excess from the dataframe
+        tod_excess = pdf_data.groupby('TOD_Category')['Excess'].sum().reset_index()
+        
+        # TOD descriptions with time ranges removed for better readability
+        tod_descriptions = {
+            'C1': 'Morning Peak',
+            'C2': 'Evening Peak',
+            'C4': 'Normal Hours',
+            'C5': 'Night Hours',
+            'Unknown': 'Unknown Time Slot'
+        }
+        
+        for _, row in tod_excess.iterrows():
+            category = row['TOD_Category']
+            description = tod_descriptions.get(category, 'Unknown')
+            excess = row['Excess']
+            pdf.cell(40, 8, category, 1)
+            pdf.cell(40, 8, description, 1)
+            pdf.cell(40, 8, f"{excess:.4f}", 1)
+            pdf.ln()
+        
         pdf.ln(5)
         pdf.set_font('Arial', 'B', 12)
         pdf.cell(0, 10, 'Financial Calculations:', ln=True)
@@ -408,7 +496,10 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
     
     if show_excess_only:
         try:
-            pdf_obj = generate_pdf(merged[merged['Excess'] > 0], 'energy_adjustment_excess_only.pdf')
+            # Create a filtered dataframe for display but use the total consumed energy from all slots
+            merged_excess = merged[merged['Excess'] > 0].copy()
+            # We'll pass the filtered data but the total_consumed will be from all slots
+            pdf_obj = generate_pdf(merged_excess, 'energy_adjustment_excess_only.pdf', use_total_consumed=total_consumed)
             pdfs.append(('energy_adjustment_excess_only.pdf', pdf_obj))
         except Exception as e:
             st.error(f"Error generating 'Excess Only' PDF: {e}")
@@ -416,7 +507,8 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
 
     if show_all_slots:
         try:
-            pdf_obj = generate_pdf(merged, 'energy_adjustment_all_slots.pdf')
+            # For all slots, we use the same total_consumed value for consistency
+            pdf_obj = generate_pdf(merged, 'energy_adjustment_all_slots.pdf', use_total_consumed=total_consumed)
             pdfs.append(('energy_adjustment_all_slots.pdf', pdf_obj))
         except Exception as e:
             st.error(f"Error generating 'All Slots' PDF: {e}")
@@ -424,6 +516,7 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
 
     if show_daywise:
         try:
+            # For daywise PDF, we also use the same total_consumed value for consistency
             pdf_obj = generate_daywise_pdf(merged, 'energy_adjustment_daywise.pdf')
             pdfs.append(('energy_adjustment_daywise.pdf', pdf_obj))
         except Exception as e:

@@ -478,7 +478,8 @@ def index():
         merged_all = merged.copy()
         sum_injection_excess = merged_excess['Energy_kWh_gen'].sum()
         total_generated_after_loss_excess = merged_excess['After_Loss'].sum()
-        total_consumed_excess = merged_excess['Energy_kWh_cons'].sum()
+        # Use the total consumed energy from all slots for consistency across all PDFs
+        total_consumed_excess = merged['Energy_kWh_cons'].sum()  # Changed from merged_excess to merged
         total_excess_excess = merged_excess['Excess'].sum()
         sum_injection_all = merged_all['Energy_kWh_gen'].sum()
         total_generated_after_loss_all = merged_all['After_Loss'].sum()
