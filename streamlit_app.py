@@ -5,6 +5,7 @@ from fpdf import FPDF
 import zipfile
 from datetime import datetime, timedelta
 import traceback
+import math
 
 st.set_page_config(page_title="Energy Adjustment Calculator", layout="wide")
 
@@ -18,8 +19,8 @@ with col2:
 st.markdown('Upload your generated and consumed energy Excel files, enter parameters, and download the PDF report.')
 
 # --- UI Elements ---
-generated_files = st.file_uploader('Generated Energy Excel Files (MW)', type=['xlsx', 'xls'], accept_multiple_files=True)
-consumed_files = st.file_uploader('Consumed Energy Excel Files (kWh)', type=['xlsx', 'xls'], accept_multiple_files=True)
+generated_files = st.file_uploader('Generated Energy Excel Files (MW) From SLDC', type=['xlsx', 'xls'], accept_multiple_files=True)
+consumed_files = st.file_uploader('Consumed Energy Excel Files (kWh) From MRT', type=['xlsx', 'xls'], accept_multiple_files=True)
 
 consumer_number = st.text_input('Consumer Number')
 consumer_name = st.text_input('Consumer Name')
@@ -89,9 +90,9 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
         unique_months = gen_df['Date'].dt.month.unique()
         unique_years = gen_df['Date'].dt.year.unique()
         if len(unique_months) == 1 and not month:
-            month = str(unique_months[0])
+            month = str(int(unique_months[0]))
         elif len(unique_months) > 1 and not month:
-            month = str(gen_df['Date'].dt.month.value_counts().idxmax())
+            month = str(int(gen_df['Date'].dt.month.value_counts().idxmax()))
         if len(unique_years) == 1 and not year:
             # Convert to integer first to remove any decimal part
             year = str(int(unique_years[0]))
@@ -253,7 +254,7 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
     base_amount = total_excess * base_rate
     
     c1_c2_excess = tod_excess.get('C1', 0) + tod_excess.get('C2', 0)
-    c1_c2_additional = c1_c2_excess * 1.81
+    c1_c2_additional = c1_c2_excess * 1.8125
     
     c5_excess = tod_excess.get('C5', 0)
     c5_additional = c5_excess * 0.3625
@@ -274,6 +275,9 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
         wheeling_charges = 0
 
     final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges)
+    
+    # Round up final amount to next highest value
+    final_amount_rounded = math.ceil(final_amount)
 
     merged.drop(['Slot_Date_dt', 'Slot_Time_min'], axis=1, inplace=True)
     
@@ -383,7 +387,7 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
         pdf.cell(0, 10, 'Financial Calculations:', ln=True)
         pdf.set_font('Arial', '', 10)
         pdf.cell(0, 8, f"1. Base Rate: {total_excess:.4f} kWh x Rs.{base_rate:.2f} = Rs.{base_amount:.2f}", ln=True)
-        pdf.cell(0, 8, f"2. C1+C2 Additional: {c1_c2_excess:.4f} kWh x Rs.1.81 = Rs.{c1_c2_additional:.2f}", ln=True)
+        pdf.cell(0, 8, f"2. C1+C2 Additional: {c1_c2_excess:.4f} kWh x Rs.1.8125 = Rs.{c1_c2_additional:.2f}", ln=True)
         pdf.cell(0, 8, f"3. C5 Additional: {c5_excess:.4f} kWh x Rs.0.3625 = Rs.{c5_additional:.2f}", ln=True)
         pdf.cell(0, 8, f"4. Total Amount: Rs.{total_amount:.2f}", ln=True)
         pdf.cell(0, 8, f"5. E-Tax (5%): Rs.{etax:.2f}", ln=True)
@@ -393,6 +397,7 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
         pdf.cell(0, 8, f"9. Wheeling Charges: Rs.{wheeling_charges:.2f}", ln=True)
         pdf.set_font('Arial', 'B', 10)
         pdf.cell(0, 10, f"10. Total Amount to be Collected: Rs.{final_amount:.2f}", ln=True)
+        pdf.cell(0, 10, f"11. Final Amount (Rounded Up): Rs.{final_amount_rounded}", ln=True)
 
         pdf_bytes = pdf.output(dest='S')
         if isinstance(pdf_bytes, str):
@@ -486,7 +491,7 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
         pdf.cell(0, 10, 'Financial Calculations:', ln=True)
         pdf.set_font('Arial', '', 10)
         pdf.cell(0, 8, f"1. Base Rate: {total_excess:.4f} kWh x Rs.{base_rate:.2f} = Rs.{base_amount:.2f}", ln=True)
-        pdf.cell(0, 8, f"2. C1+C2 Additional: {c1_c2_excess:.4f} kWh x Rs.1.81 = Rs.{c1_c2_additional:.2f}", ln=True)
+        pdf.cell(0, 8, f"2. C1+C2 Additional: {c1_c2_excess:.4f} kWh x Rs.1.8125 = Rs.{c1_c2_additional:.2f}", ln=True)
         pdf.cell(0, 8, f"3. C5 Additional: {c5_excess:.4f} kWh x Rs.0.3625 = Rs.{c5_additional:.2f}", ln=True)
         pdf.cell(0, 8, f"4. Total Amount: Rs.{total_amount:.2f}", ln=True)
         pdf.cell(0, 8, f"5. E-Tax (5%): Rs.{etax:.2f}", ln=True)
@@ -496,6 +501,7 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
         pdf.cell(0, 8, f"9. Wheeling Charges: Rs.{wheeling_charges:.2f}", ln=True)
         pdf.set_font('Arial', 'B', 10)
         pdf.cell(0, 10, f"10. Total Amount to be Collected: Rs.{final_amount:.2f}", ln=True)
+        pdf.cell(0, 10, f"11. Final Amount (Rounded Up): Rs.{final_amount_rounded}", ln=True)
 
         pdf_bytes = pdf.output(dest='S')
         if isinstance(pdf_bytes, str):
@@ -504,6 +510,28 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
         return pdf_output
 
     # --- PDF Generation Logic ---
+    # Generate custom filename based on service number and name
+    def generate_custom_filename(base_name, consumer_number, consumer_name):
+        # Get last 3 digits of service number
+        last_3_digits = str(consumer_number)[-3:] if len(str(consumer_number)) >= 3 else str(consumer_number)
+        
+        # Clean consumer name for filename (remove special characters)
+        clean_name = "".join(c for c in consumer_name if c.isalnum() or c in (' ', '-', '_')).strip()
+        clean_name = clean_name.replace(' ', '_')
+        
+        # Generate filename: last3digits_servicename.pdf
+        filename = f"{last_3_digits}_{clean_name}.pdf"
+        
+        # Add base name prefix for different PDF types
+        if 'excess_only' in base_name:
+            filename = f"{last_3_digits}_{clean_name}_excess_only.pdf"
+        elif 'all_slots' in base_name:
+            filename = f"{last_3_digits}_{clean_name}_all_slots.pdf"
+        elif 'daywise' in base_name:
+            filename = f"{last_3_digits}_{clean_name}_daywise.pdf"
+        
+        return filename
+
     pdfs = []
     if not (show_excess_only or show_all_slots or show_daywise):
         show_all_slots = True # Default option
@@ -513,8 +541,9 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
             # Create a filtered dataframe for display but use the total consumed energy from all slots
             merged_excess = merged[merged['Excess'] > 0].copy()
             # We'll pass the filtered data but the total_consumed will be from all slots
-            pdf_obj = generate_pdf(merged_excess, 'energy_adjustment_excess_only.pdf', use_total_consumed=total_consumed)
-            pdfs.append(('energy_adjustment_excess_only.pdf', pdf_obj))
+            custom_filename = generate_custom_filename('energy_adjustment_excess_only.pdf', consumer_number, consumer_name)
+            pdf_obj = generate_pdf(merged_excess, custom_filename, use_total_consumed=total_consumed)
+            pdfs.append((custom_filename, pdf_obj))
         except Exception as e:
             st.error(f"Error generating 'Excess Only' PDF: {e}")
             st.error(traceback.format_exc())
@@ -522,8 +551,9 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
     if show_all_slots:
         try:
             # For all slots, we use the same total_consumed value for consistency
-            pdf_obj = generate_pdf(merged, 'energy_adjustment_all_slots.pdf', use_total_consumed=total_consumed)
-            pdfs.append(('energy_adjustment_all_slots.pdf', pdf_obj))
+            custom_filename = generate_custom_filename('energy_adjustment_all_slots.pdf', consumer_number, consumer_name)
+            pdf_obj = generate_pdf(merged, custom_filename, use_total_consumed=total_consumed)
+            pdfs.append((custom_filename, pdf_obj))
         except Exception as e:
             st.error(f"Error generating 'All Slots' PDF: {e}")
             st.error(traceback.format_exc())
@@ -531,8 +561,9 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
     if show_daywise:
         try:
             # For daywise PDF, we also use the same total_consumed value for consistency
-            pdf_obj = generate_daywise_pdf(merged, 'energy_adjustment_daywise.pdf')
-            pdfs.append(('energy_adjustment_daywise.pdf', pdf_obj))
+            custom_filename = generate_custom_filename('energy_adjustment_daywise.pdf', consumer_number, consumer_name)
+            pdf_obj = generate_daywise_pdf(merged, custom_filename)
+            pdfs.append((custom_filename, pdf_obj))
         except Exception as e:
             st.error(f"Error generating 'Day-wise' PDF: {e}")
             st.error(traceback.format_exc())
@@ -544,12 +575,18 @@ def process_and_generate(generated_files, consumed_files, consumer_number, consu
         fname, pdf_io = pdfs[0]
         return pdf_io.getvalue(), fname, 'application/pdf'
     else:
+        # Generate custom ZIP filename
+        last_3_digits = str(consumer_number)[-3:] if len(str(consumer_number)) >= 3 else str(consumer_number)
+        clean_name = "".join(c for c in consumer_name if c.isalnum() or c in (' ', '-', '_')).strip()
+        clean_name = clean_name.replace(' ', '_')
+        zip_filename = f"{last_3_digits}_{clean_name}_energy_adjustment_reports.zip"
+        
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w') as zf:
             for fname, pdf_io in pdfs:
                 zf.writestr(fname, pdf_io.getvalue())
         zip_buffer.seek(0)
-        return zip_buffer.getvalue(), 'energy_adjustment_reports.zip', 'application/zip'
+        return zip_buffer.getvalue(), zip_filename, 'application/zip'
 
 # --- Button to trigger processing ---
 if st.button('Generate PDF Report'):

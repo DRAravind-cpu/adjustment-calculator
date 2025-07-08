@@ -3,6 +3,7 @@ import pandas as pd
 from fpdf import FPDF
 import io
 import os
+import math
 
 app = Flask(__name__)
 
@@ -80,19 +81,19 @@ def index():
             unique_years = gen_df['Date'].dt.year.unique()
             
             if len(unique_months) == 1 and not month:
-                month = str(unique_months[0])
+                month = str(int(unique_months[0]))
                 print(f"Auto-detected month: {month} ({get_month_name(month)})")
             elif len(unique_months) > 1 and not month:
                 # If multiple months, use the most frequent one
-                month = str(gen_df['Date'].dt.month.value_counts().idxmax())
+                month = str(int(gen_df['Date'].dt.month.value_counts().idxmax()))
                 print(f"Multiple months detected, using most frequent: {month} ({get_month_name(month)})")
             
             if len(unique_years) == 1 and not year:
-                year = str(unique_years[0])
+                year = str(int(unique_years[0]))
                 print(f"Auto-detected year: {year}")
             elif len(unique_years) > 1 and not year:
                 # If multiple years, use the most frequent one
-                year = str(gen_df['Date'].dt.year.value_counts().idxmax())
+                year = str(int(gen_df['Date'].dt.year.value_counts().idxmax()))
                 print(f"Multiple years detected, using most frequent: {year}")
                 
             # Add information to be displayed in PDF
@@ -101,8 +102,13 @@ def index():
         # Filter by year/month with custom slot logic (handle slot ranges in Time column)
         filtered_gen = gen_df.copy()
         if year and month:
-            year_int = int(year)
-            month_int = int(month)
+            try:
+                # Handle potential float strings by converting to float first, then int
+                year_int = int(float(year))
+                month_int = int(float(month))
+            except ValueError as e:
+                return render_template('index.html', error=f"Invalid year or month value. Year: '{year}', Month: '{month}'. Error: {str(e)}")
+            
             # Start: 1st of month at 00:00, End: last day of month at 23:45 (inclusive)
             start_date = pd.Timestamp(year_int, month_int, 1, 0, 0)
             if month_int == 12:
@@ -135,11 +141,17 @@ def index():
             print(f"Filtered generated data: {len(filtered_gen)} rows")
         else:
             if year:
-                year_int = int(year)
-                filtered_gen = filtered_gen[filtered_gen['Date'].dt.year == year_int]
+                try:
+                    year_int = int(float(year))
+                    filtered_gen = filtered_gen[filtered_gen['Date'].dt.year == year_int]
+                except ValueError:
+                    return render_template('index.html', error=f"Invalid year value: '{year}'")
             if month:
-                month_int = int(month)
-                filtered_gen = filtered_gen[filtered_gen['Date'].dt.month == month_int]
+                try:
+                    month_int = int(float(month))
+                    filtered_gen = filtered_gen[filtered_gen['Date'].dt.month == month_int]
+                except ValueError:
+                    return render_template('index.html', error=f"Invalid month value: '{month}'")
         if date_filter:
             try:
                 date_obj = pd.to_datetime(date_filter, dayfirst=True)
@@ -227,8 +239,12 @@ def index():
         # Filter by year/month with custom slot logic (handle slot ranges in Time column)
         filtered_cons = cons_df.copy()
         if year and month:
-            year_int = int(year)
-            month_int = int(month)
+            try:
+                year_int = int(float(year))
+                month_int = int(float(month))
+            except ValueError as e:
+                return render_template('index.html', error=f"Invalid year or month value in consumption data. Year: '{year}', Month: '{month}'. Error: {str(e)}")
+            
             # Start: 1st of month at 00:00, End: last day of month at 23:45 (inclusive)
             start_date = pd.Timestamp(year_int, month_int, 1, 0, 0)
             if month_int == 12:
@@ -259,10 +275,17 @@ def index():
             print(f"Filtered consumed data: {len(filtered_cons)} rows")
         else:
             if year:
-                year_int = int(year)
-                filtered_cons = filtered_cons[filtered_cons['Date'].dt.year == year_int]
+                try:
+                    year_int = int(float(year))
+                    filtered_cons = filtered_cons[filtered_cons['Date'].dt.year == year_int]
+                except ValueError:
+                    return render_template('index.html', error=f"Invalid year value in consumption filtering: '{year}'")
             if month:
-                month_int = int(month)
+                try:
+                    month_int = int(float(month))
+                    filtered_cons = filtered_cons[filtered_cons['Date'].dt.month == month_int]
+                except ValueError:
+                    return render_template('index.html', error=f"Invalid month value in consumption filtering: '{month}'")
                 filtered_cons = filtered_cons[filtered_cons['Date'].dt.month == month_int]
         if date_filter:
             try:
@@ -444,7 +467,7 @@ def index():
         
         # Additional charges for specific TOD categories
         c1_c2_excess = tod_excess.loc[tod_excess['TOD_Category'].isin(['C1', 'C2']), 'Excess'].sum()
-        c1_c2_additional = c1_c2_excess * 1.81  # rupees per kWh
+        c1_c2_additional = c1_c2_excess * 1.8125  # rupees per kWh
         
         c5_excess = tod_excess.loc[tod_excess['TOD_Category'] == 'C5', 'Excess'].sum()
         c5_additional = c5_excess * 0.3625  # rupees per kWh
@@ -465,6 +488,9 @@ def index():
         
         # Calculate final amount to be collected
         final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges)
+        
+        # Round up final amount to next highest value
+        final_amount_rounded = math.ceil(final_amount)
         
         merged.drop(['Slot_Date_dt', 'Slot_Time_min'], axis=1, inplace=True)
         # Totals
@@ -629,8 +655,8 @@ def index():
             
             # Additional charges for specific TOD categories
             c1_c2_excess = tod_excess.loc[tod_excess['TOD_Category'].isin(['C1', 'C2']), 'Excess'].sum()
-            c1_c2_additional = c1_c2_excess * 1.81  # rupees per kWh
-            pdf.cell(0, 8, f"2. C1+C2 Additional: Excess in C1+C2 ({c1_c2_excess:.4f} kWh) x Rs.1.81 = Rs.{c1_c2_additional:.2f}", ln=True)
+            c1_c2_additional = c1_c2_excess * 1.8125  # rupees per kWh
+            pdf.cell(0, 8, f"2. C1+C2 Additional: Excess in C1+C2 ({c1_c2_excess:.4f} kWh) x Rs.1.8125 = Rs.{c1_c2_additional:.2f}", ln=True)
             
             c5_excess = tod_excess.loc[tod_excess['TOD_Category'] == 'C5', 'Excess'].sum()
             c5_additional = c5_excess * 0.3625  # rupees per kWh
@@ -671,8 +697,13 @@ def index():
             
             # Calculate final amount to be collected
             final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges)
+            
+            # Round up final amount to next highest value
+            final_amount_rounded = math.ceil(final_amount)
+            
             pdf.set_font('Arial', 'B', 10)
             pdf.cell(0, 10, f"10. Total Amount to be Collected: Rs.{total_with_etax:.2f} - (Rs.{etax_on_iex:.2f} + Rs.{cross_subsidy_surcharge:.2f} + Rs.{wheeling_charges:.2f}) = Rs.{final_amount:.2f}", ln=True)
+            pdf.cell(0, 10, f"11. Final Amount (Rounded Up): Rs.{final_amount_rounded}", ln=True)
             
             try:
                 print("DEBUG: Generating PDF output in generate_pdf function...")
@@ -747,8 +778,12 @@ def index():
             import pandas as pd
             # Determine full date range for the selected month
             if month and year:
-                month_int = int(month)
-                year_int = int(year)
+                try:
+                    month_int = int(float(month))
+                    year_int = int(float(year))
+                except ValueError:
+                    return render_template('index.html', error=f"Invalid month or year value in daywise PDF generation. Month: '{month}', Year: '{year}'")
+                
                 start_date = datetime(year_int, month_int, 1)
                 if month_int == 12:
                     end_date = datetime(year_int, 12, 31) + timedelta(days=1)
@@ -842,8 +877,8 @@ def index():
             
             # Additional charges for specific TOD categories
             c1_c2_excess = tod_excess.loc[tod_excess['TOD_Category'].isin(['C1', 'C2']), 'Excess'].sum()
-            c1_c2_additional = c1_c2_excess * 1.81  # rupees per kWh
-            pdf.cell(0, 8, f"2. C1+C2 Additional: Excess in C1+C2 ({c1_c2_excess:.4f} kWh) x Rs.1.81 = Rs.{c1_c2_additional:.2f}", ln=True)
+            c1_c2_additional = c1_c2_excess * 1.8125  # rupees per kWh
+            pdf.cell(0, 8, f"2. C1+C2 Additional: Excess in C1+C2 ({c1_c2_excess:.4f} kWh) x Rs.1.8125 = Rs.{c1_c2_additional:.2f}", ln=True)
             
             c5_excess = tod_excess.loc[tod_excess['TOD_Category'] == 'C5', 'Excess'].sum()
             c5_additional = c5_excess * 0.3625  # rupees per kWh
@@ -884,8 +919,13 @@ def index():
             
             # Calculate final amount to be collected
             final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges)
+            
+            # Round up final amount to next highest value
+            final_amount_rounded = math.ceil(final_amount)
+            
             pdf.set_font('Arial', 'B', 10)
             pdf.cell(0, 10, f"10. Total Amount to be Collected: Rs.{total_with_etax:.2f} - (Rs.{etax_on_iex:.2f} + Rs.{cross_subsidy_surcharge:.2f} + Rs.{wheeling_charges:.2f}) = Rs.{final_amount:.2f}", ln=True)
+            pdf.cell(0, 10, f"11. Final Amount (Rounded Up): Rs.{final_amount_rounded}", ln=True)
             
             try:
                 print("DEBUG: Generating PDF output in generate_daywise_pdf function...")
@@ -912,6 +952,28 @@ def index():
                     print(f"ERROR: Context: '...{context}...'")
                 raise
 
+        # Generate custom filename based on service number and name
+        def generate_custom_filename(base_name, consumer_number, consumer_name):
+            # Get last 3 digits of service number
+            last_3_digits = str(consumer_number)[-3:] if len(str(consumer_number)) >= 3 else str(consumer_number)
+            
+            # Clean consumer name for filename (remove special characters)
+            clean_name = "".join(c for c in consumer_name if c.isalnum() or c in (' ', '-', '_')).strip()
+            clean_name = clean_name.replace(' ', '_')
+            
+            # Generate filename: last3digits_servicename.pdf
+            filename = f"{last_3_digits}_{clean_name}.pdf"
+            
+            # Add base name prefix for different PDF types
+            if 'excess_only' in base_name:
+                filename = f"{last_3_digits}_{clean_name}_excess_only.pdf"
+            elif 'all_slots' in base_name:
+                filename = f"{last_3_digits}_{clean_name}_all_slots.pdf"
+            elif 'daywise' in base_name:
+                filename = f"{last_3_digits}_{clean_name}_daywise.pdf"
+            
+            return filename
+
         # Defensive: If no PDF options are selected, default to generating 'all slots' PDF
         if not (show_excess_only or show_all_slots or show_daywise):
             show_all_slots = True
@@ -922,33 +984,36 @@ def index():
         if show_excess_only:
             try:
                 print('DEBUG: Generating excess only PDF...')
+                custom_filename = generate_custom_filename('energy_adjustment_excess_only.pdf', consumer_number, consumer_name)
                 pdf_obj = generate_pdf(
-                    merged_excess, sum_injection_excess, total_generated_after_loss_excess, comparison_excess, total_consumed_excess, total_excess_excess, excess_status, 'energy_adjustment_excess_only.pdf')
+                    merged_excess, sum_injection_excess, total_generated_after_loss_excess, comparison_excess, total_consumed_excess, total_excess_excess, excess_status, custom_filename)
                 print('DEBUG: generate_pdf (excess only) returned:', type(pdf_obj))
                 if pdf_obj is not None:
-                    pdfs.append(('energy_adjustment_excess_only.pdf', pdf_obj))
+                    pdfs.append((custom_filename, pdf_obj))
             except Exception as e:
                 print('ERROR in generate_pdf (excess only):', e)
                 traceback.print_exc()
         if show_all_slots:
             try:
                 print('DEBUG: Generating all slots PDF...')
+                custom_filename = generate_custom_filename('energy_adjustment_all_slots.pdf', consumer_number, consumer_name)
                 pdf_obj = generate_pdf(
-                    merged_all, sum_injection_all, total_generated_after_loss_all, comparison_all, total_consumed_all, total_excess_all, excess_status, 'energy_adjustment_all_slots.pdf')
+                    merged_all, sum_injection_all, total_generated_after_loss_all, comparison_all, total_consumed_all, total_excess_all, excess_status, custom_filename)
                 print('DEBUG: generate_pdf (all slots) returned:', type(pdf_obj))
                 if pdf_obj is not None:
-                    pdfs.append(('energy_adjustment_all_slots.pdf', pdf_obj))
+                    pdfs.append((custom_filename, pdf_obj))
             except Exception as e:
                 print('ERROR in generate_pdf (all slots):', e)
                 traceback.print_exc()
         if show_daywise:
             try:
                 print('DEBUG: Generating daywise PDF...')
+                custom_filename = generate_custom_filename('energy_adjustment_daywise.pdf', consumer_number, consumer_name)
                 pdf_obj = generate_daywise_pdf(
-                    merged_all, month, year, 'energy_adjustment_daywise.pdf')
+                    merged_all, month, year, custom_filename)
                 print('DEBUG: generate_daywise_pdf returned:', type(pdf_obj))
                 if pdf_obj is not None:
-                    pdfs.append(('energy_adjustment_daywise.pdf', pdf_obj))
+                    pdfs.append((custom_filename, pdf_obj))
             except Exception as e:
                 print('ERROR in generate_daywise_pdf:', e)
                 traceback.print_exc()
@@ -959,11 +1024,18 @@ def index():
                 print('DEBUG: Returning ZIP file to client')
                 import zipfile
                 zip_buffer = io.BytesIO()
+                
+                # Generate custom ZIP filename
+                last_3_digits = str(consumer_number)[-3:] if len(str(consumer_number)) >= 3 else str(consumer_number)
+                clean_name = "".join(c for c in consumer_name if c.isalnum() or c in (' ', '-', '_')).strip()
+                clean_name = clean_name.replace(' ', '_')
+                zip_filename = f"{last_3_digits}_{clean_name}_energy_adjustment_reports.zip"
+                
                 with zipfile.ZipFile(zip_buffer, 'w') as zf:
                     for fname, pdf_io in pdfs:
                         zf.writestr(fname, pdf_io.getvalue())
                 zip_buffer.seek(0)
-                return send_file(zip_buffer, as_attachment=True, download_name='energy_adjustment_reports.zip', mimetype='application/zip')
+                return send_file(zip_buffer, as_attachment=True, download_name=zip_filename, mimetype='application/zip')
             elif len(pdfs) == 1:
                 fname, pdf_io = pdfs[0]
                 print(f'DEBUG: Returning PDF file to client: {fname}')
