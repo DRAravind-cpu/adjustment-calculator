@@ -40,26 +40,81 @@
                 Please select at least one PDF output option.
             </div>
         </div>
+        
+        <!-- 1. Consumer Number -->
         <div class="mb-3">
             <label for="consumer_number" class="form-label">Consumer Number</label>
             <input type="text" class="form-control" id="consumer_number" name="consumer_number" required>
         </div>
+        
+        <!-- 2. Consumer Name -->
         <div class="mb-3">
             <label for="consumer_name" class="form-label">Consumer Name</label>
             <input type="text" class="form-control" id="consumer_name" name="consumer_name" required>
         </div>
+        
+        <!-- 3. I.E.X Generation Files with Toggle -->
         <div class="mb-3">
-            <label for="t_and_d_loss" class="form-label">T&D Loss (%)</label>
-            <input type="number" step="0.01" class="form-control" id="t_and_d_loss" name="t_and_d_loss" required>
+            <div class="form-check mb-2">
+                <input class="form-check-input" type="checkbox" id="enable_iex" name="enable_iex" value="1">
+                <label class="form-check-label fw-bold" for="enable_iex">
+                    Enable I.E.X Generation
+                </label>
+            </div>
+            <div id="iex_section" style="display: none;">
+                <label for="generated_files" class="form-label">Generated Energy Excel Files I.E.X (MW) From SLDC</label>
+                <input type="file" class="form-control" id="generated_files" name="generated_files" accept=".xlsx,.xls" multiple>
+                <small class="form-text text-muted">You can select multiple files by holding Ctrl (or Cmd on Mac) while selecting files.</small>
+            </div>
         </div>
+        
+        <!-- 4. T&D Loss for I.E.X -->
+        <div class="mb-3" id="iex_td_loss_section" style="display: none;">
+            <label for="t_and_d_loss" class="form-label">T&D Loss (%) for I.E.X</label>
+            <input type="number" step="0.01" class="form-control" id="t_and_d_loss" name="t_and_d_loss" placeholder="Enter T&D loss for I.E.X generation">
+        </div>
+        
+        <!-- 5. C.P.P Generation Files with Toggle -->
+        <div class="mb-3">
+            <div class="form-check mb-2">
+                <input class="form-check-input" type="checkbox" id="enable_cpp" name="enable_cpp" value="1">
+                <label class="form-check-label fw-bold" for="enable_cpp">
+                    Enable C.P.P Generation
+                </label>
+            </div>
+            <div id="cpp_section" style="display: none;">
+                <label for="cpp_files" class="form-label">Generated Energy Excel Files C.P.P (MW) From SLDC</label>
+                <input type="file" class="form-control" id="cpp_files" name="cpp_files" accept=".xlsx,.xls" multiple>
+                <small class="form-text text-muted">You can select multiple files by holding Ctrl (or Cmd on Mac) while selecting files.</small>
+            </div>
+        </div>
+        
+        <!-- 6. T&D Loss for C.P.P -->
+        <div class="mb-3" id="cpp_td_loss_section" style="display: none;">
+            <label for="cpp_t_and_d_loss" class="form-label">T&D Loss (%) for C.P.P</label>
+            <input type="number" step="0.01" class="form-control" id="cpp_t_and_d_loss" name="cpp_t_and_d_loss" placeholder="Enter T&D loss for C.P.P generation">
+        </div>
+        
+        <!-- 7. Consumed Energy Files -->
+        <div class="mb-3">
+            <label for="consumed_files" class="form-label">Consumed Energy Excel Files (kWh) From MRT</label>
+            <input type="file" class="form-control" id="consumed_files" name="consumed_files" accept=".xlsx,.xls" multiple required>
+            <small class="form-text text-muted">You can select multiple files by holding Ctrl (or Cmd on Mac) while selecting files.</small>
+        </div>
+        
+        <!-- 8. Multiplication Factor -->
         <div class="mb-3">
             <label for="multiplication_factor" class="form-label">Multiplication Factor (for Consumed Energy)</label>
             <input type="number" step="0.01" class="form-control" id="multiplication_factor" name="multiplication_factor" required>
         </div>
+        
+        <!-- 9. Date -->
         <div class="mb-3">
             <label for="date" class="form-label">Date (optional, dd/mm/yyyy)</label>
             <input type="text" class="form-control" id="date" name="date" placeholder="e.g. 10/10/2024">
         </div>
+        
+        <!-- 10. Month -->
         <div class="mb-3">
             <label for="month" class="form-label">Month (optional)</label>
             <select class="form-control" id="month" name="month">
@@ -78,20 +133,13 @@
                 <option value="12">December</option>
             </select>
         </div>
+        
+        <!-- 11. Year -->
         <div class="mb-3">
             <label for="year" class="form-label">Year (optional if auto-detect is enabled)</label>
             <input type="number" min="2000" max="2100" class="form-control" id="year" name="year">
         </div>
-        <div class="mb-3">
-            <label for="generated_files" class="form-label">Generated Energy Excel Files (MW) From SLDC</label>
-            <input type="file" class="form-control" id="generated_files" name="generated_files" accept=".xlsx,.xls" multiple required>
-            <small class="form-text text-muted">You can select multiple files by holding Ctrl (or Cmd on Mac) while selecting files.</small>
-        </div>
-        <div class="mb-3">
-            <label for="consumed_files" class="form-label">Consumed Energy Excel Files (kWh) From MRT</label>
-            <input type="file" class="form-control" id="consumed_files" name="consumed_files" accept=".xlsx,.xls" multiple required>
-            <small class="form-text text-muted">You can select multiple files by holding Ctrl (or Cmd on Mac) while selecting files.</small>
-        </div>
+        
         <div class="form-check mb-3">
             <input class="form-check-input" type="checkbox" id="auto_detect_month" name="auto_detect_month" value="1" checked>
             <label class="form-check-label" for="auto_detect_month">Auto-detect month and year from files</label>
@@ -109,6 +157,47 @@ function validateForm() {
         return false;
     }
     document.getElementById('pdf-options-error').style.display = 'none';
+    
+    // Check if at least one generation source is enabled
+    var iexEnabled = document.getElementById('enable_iex').checked;
+    var cppEnabled = document.getElementById('enable_cpp').checked;
+    
+    if (!iexEnabled && !cppEnabled) {
+        alert('Please enable at least one generation source (I.E.X or C.P.P).');
+        return false;
+    }
+    
+    // Check if files are selected for enabled sources
+    if (iexEnabled) {
+        var iexFiles = document.getElementById('generated_files').files.length > 0;
+        var iexTdLoss = document.getElementById('t_and_d_loss').value;
+        
+        if (!iexFiles) {
+            alert('Please select I.E.X generation files since I.E.X is enabled.');
+            return false;
+        }
+        
+        if (!iexTdLoss || iexTdLoss === '') {
+            alert('Please enter T&D Loss for I.E.X generation since I.E.X is enabled.');
+            return false;
+        }
+    }
+    
+    if (cppEnabled) {
+        var cppFiles = document.getElementById('cpp_files').files.length > 0;
+        var cppTdLoss = document.getElementById('cpp_t_and_d_loss').value;
+        
+        if (!cppFiles) {
+            alert('Please select C.P.P generation files since C.P.P is enabled.');
+            return false;
+        }
+        
+        if (!cppTdLoss || cppTdLoss === '') {
+            alert('Please enter T&D Loss for C.P.P generation since C.P.P is enabled.');
+            return false;
+        }
+    }
+    
     return true;
 }
 
@@ -121,6 +210,38 @@ document.addEventListener('DOMContentLoaded', function() {
                 document.getElementById('pdf-options-error').style.display = 'none';
             }
         });
+    });
+    
+    // Add toggle functionality for I.E.X
+    document.getElementById('enable_iex').addEventListener('change', function() {
+        var iexSection = document.getElementById('iex_section');
+        var iexTdSection = document.getElementById('iex_td_loss_section');
+        if (this.checked) {
+            iexSection.style.display = 'block';
+            iexTdSection.style.display = 'block';
+        } else {
+            iexSection.style.display = 'none';
+            iexTdSection.style.display = 'none';
+            // Clear values when disabled
+            document.getElementById('generated_files').value = '';
+            document.getElementById('t_and_d_loss').value = '';
+        }
+    });
+    
+    // Add toggle functionality for C.P.P
+    document.getElementById('enable_cpp').addEventListener('change', function() {
+        var cppSection = document.getElementById('cpp_section');
+        var cppTdSection = document.getElementById('cpp_td_loss_section');
+        if (this.checked) {
+            cppSection.style.display = 'block';
+            cppTdSection.style.display = 'block';
+        } else {
+            cppSection.style.display = 'none';
+            cppTdSection.style.display = 'none';
+            // Clear values when disabled
+            document.getElementById('cpp_files').value = '';
+            document.getElementById('cpp_t_and_d_loss').value = '';
+        }
     });
 });
 </script>
