@@ -27,9 +27,12 @@ def create_ultimate_installer():
         'streamlit_app.py',
         'app.py',
         'requirements.txt',
+        'auto_updater.py',
+        'version.json',
         'BUILD_INSTRUCTIONS.md',
         'WINDOWS_APP_GUIDE.md',
         'WINDOWS_OFFLINE_README.md',
+        'AUTO_UPDATE_GUIDE.md',
         'templates/index.html',
         '.streamlit/config.toml'
     ]

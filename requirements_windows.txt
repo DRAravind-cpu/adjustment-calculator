@@ -12,6 +12,10 @@ altair>=4.0.0
 plotly>=5.0.0
 Pillow>=8.0.0
 
+# Auto-update system dependencies
+requests>=2.25.0
+win10toast>=0.9; sys_platform == "win32"
+
 # Build dependencies
 pyinstaller>=5.0
 auto-py-to-exe>=2.0.0

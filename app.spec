@@ -9,6 +9,8 @@ a = Analysis(
     binaries=[],
     datas=[
         ('streamlit_app.py', '.'),
+        ('auto_updater.py', '.'),
+        ('version.json', '.'),
         ('templates', 'templates'),
         ('.streamlit', '.streamlit'),
     ],
@@ -22,6 +24,9 @@ a = Analysis(
         'plotly',
         'PIL',
         'xlsxwriter',
+        'requests',
+        'json',
+        'tkinter',
         'streamlit.web.cli',
         'streamlit.runtime.scriptrunner.magic_funcs',
     ],

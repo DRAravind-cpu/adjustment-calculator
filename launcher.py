@@ -7,6 +7,13 @@ import time
 import socket
 from pathlib import Path
 
+# Import auto-updater
+try:
+    from auto_updater import initialize_updater, check_for_updates_on_startup
+    UPDATER_AVAILABLE = True
+except ImportError:
+    UPDATER_AVAILABLE = False
+
 def find_free_port():
     """Find a free port for Streamlit"""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -27,16 +34,41 @@ def main():
     # Change to app directory
     os.chdir(app_dir)
     
+    # Initialize auto-updater
+    updater = None
+    if UPDATER_AVAILABLE:
+        try:
+            # Get current version
+            version_file = app_dir / "version.json"
+            current_version = "1.0.0"
+            if version_file.exists():
+                import json
+                with open(version_file, 'r') as f:
+                    version_data = json.load(f)
+                    current_version = version_data.get("version", "1.0.0")
+            
+            updater = initialize_updater(current_version)
+            print("Auto-updater initialized successfully")
+        except Exception as e:
+            print(f"Auto-updater initialization failed: {e}")
+    
     # Find free port
     port = find_free_port()
     
     print("=" * 60)
     print("Energy Adjustment Calculator - Offline Version")
     print("=" * 60)
+    print(f"Version: {current_version if 'current_version' in locals() else '1.0.0'}")
     print(f"Starting application on port {port}...")
     print("The application will open in your default web browser.")
+    if updater:
+        print("Auto-update system: Enabled")
     print("To stop the application, close this window.")
     print("=" * 60)
+    
+    # Check for updates in background
+    if updater:
+        check_for_updates_on_startup(updater)
     
     # Start Streamlit
     try:

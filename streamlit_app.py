@@ -3,8 +3,17 @@ import pandas as pd
 import io
 import os
 import math
+import json
 from fpdf import FPDF
 from datetime import datetime, timedelta
+from pathlib import Path
+
+# Import auto-updater
+try:
+    from auto_updater import initialize_updater, manual_update_check, show_update_settings
+    UPDATER_AVAILABLE = True
+except ImportError:
+    UPDATER_AVAILABLE = False
 
 # Set page config
 st.set_page_config(
@@ -1884,6 +1893,78 @@ if st.session_state.processed_data:
 if st.session_state.error_message:
     st.error(st.session_state.error_message)
 
+# Auto-Update Sidebar
+if UPDATER_AVAILABLE:
+    with st.sidebar:
+        st.header("🔄 Auto-Update System")
+        
+        # Get current version
+        version_file = Path(__file__).parent / "version.json"
+        current_version = "1.0.0"
+        if version_file.exists():
+            try:
+                with open(version_file, 'r') as f:
+                    version_data = json.load(f)
+                    current_version = version_data.get("version", "1.0.0")
+            except:
+                pass
+        
+        st.info(f"**Current Version:** {current_version}")
+        
+        # Initialize updater
+        if 'updater' not in st.session_state:
+            st.session_state.updater = initialize_updater(current_version)
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🔍 Check Updates", help="Check for available updates"):
+                with st.spinner("Checking for updates..."):
+                    update_info = st.session_state.updater.check_for_updates(show_no_updates=False)
+                    if update_info:
+                        st.success(f"Update available: v{update_info['version']}")
+                        st.info(f"**What's New:**\n{update_info['description'][:200]}...")
+                        
+                        if st.button("📥 Download Update", key="download_update"):
+                            with st.spinner("Downloading and applying update..."):
+                                try:
+                                    # Download update
+                                    update_file = st.session_state.updater.download_update(update_info)
+                                    if update_file:
+                                        # Apply update
+                                        if st.session_state.updater.apply_update(update_file, update_info):
+                                            st.success("✅ Update applied successfully! Please restart the application.")
+                                            st.balloons()
+                                        else:
+                                            st.error("❌ Failed to apply update.")
+                                    else:
+                                        st.error("❌ Failed to download update.")
+                                except Exception as e:
+                                    st.error(f"❌ Update failed: {e}")
+                    else:
+                        st.success("✅ You have the latest version!")
+        
+        with col2:
+            if st.button("⚙️ Settings", help="Update settings"):
+                show_update_settings(st.session_state.updater)
+        
+        # Auto-update status
+        if st.session_state.updater.config.get("auto_check", True):
+            st.success("🟢 Auto-updates enabled")
+        else:
+            st.warning("🟡 Auto-updates disabled")
+        
+        # Last check info
+        last_check = st.session_state.updater.config.get("last_check")
+        if last_check:
+            try:
+                last_check_time = datetime.fromisoformat(last_check)
+                st.caption(f"Last checked: {last_check_time.strftime('%d/%m/%Y %H:%M')}")
+            except:
+                pass
+
 # Footer
 st.markdown("---")
 st.markdown("Energy Adjustment Calculator - Streamlit Version")
+if UPDATER_AVAILABLE:
+    st.markdown("🔄 Auto-update system enabled")
