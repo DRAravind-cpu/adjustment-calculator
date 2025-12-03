@@ -1,0 +1,19 @@
+# Python cache and compiled artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Logs and run-time traces
+*.log
+streamlit.log
+streamlit_debug.log
+
+# OS-specific clutter
+.DS_Store
+Thumbs.db
