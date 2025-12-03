@@ -4,16 +4,245 @@ import io
 import os
 import math
 import json
+import calendar
 from fpdf import FPDF
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# Import auto-updater
+from typing import Any, Callable
+
+
+def _robust_to_datetime(series):
+    """Try parsing a Series of dates flexibly: first day-first, then month-first.
+    Returns a pd.Series of datetimes (may contain NaT where parsing fails).
+    """
+    try:
+        parsed = pd.to_datetime(series, errors='coerce', dayfirst=True)
+        if parsed.notna().any():
+            return parsed
+        # Fallback: try without dayfirst
+        parsed = pd.to_datetime(series, errors='coerce', dayfirst=False)
+        return parsed
+    except Exception:
+        return pd.to_datetime(series, errors='coerce')
+
+# Additional Surcharge configuration (rates vary by regulatory period)
+ADDITIONAL_SURCHARGE_WINDOWS = [
+    {
+        "start": datetime(2021, 4, 16),
+        "end": datetime(2022, 3, 31),
+        "rate": 0.70,
+        "note": "TNERC M.P.No.18 of 2020 dt.15.04.2021",
+    },
+    {
+        "start": datetime(2023, 2, 25),
+        "end": datetime(2023, 3, 31),
+        "rate": 0.83,
+        "note": "TNERC M.P.No.32 of 2021 dt.08.02.2022",
+    },
+    {
+        "start": datetime(2024, 12, 12),
+        "end": datetime(2025, 3, 31),
+        "rate": 0.54,
+        "note": "TNERC M.P.No.44 of 2024 dt.12.12.2024",
+    },
+    {
+        "start": datetime(2025, 4, 29),
+        "end": datetime(2025, 9, 30),
+        "rate": 0.10,
+        "note": "TNERC M.P.No.13 of 2025 dt.29.04.2025",
+    },
+]
+
+
+def _get_month_period_bounds(month_value, year_value):
+    """Return (month_start, month_end, label) for given month/year strings."""
+    if not month_value or not year_value:
+        return None
+    try:
+        month_int = int(float(month_value))
+        year_int = int(float(year_value))
+        if month_int < 1 or month_int > 12:
+            return None
+        last_day = calendar.monthrange(year_int, month_int)[1]
+        period_start = datetime(year_int, month_int, 1)
+        period_end = datetime(year_int, month_int, last_day)
+        period_label = f"{calendar.month_name[month_int]} {year_int}"
+        return period_start, period_end, period_label
+    except Exception:
+        return None
+
+
+def _resolve_additional_surcharge_rate(month_value, year_value):
+    """Determine applicable rate/note for the selected month/year."""
+    bounds = _get_month_period_bounds(month_value, year_value)
+    if not bounds:
+        return 0.0, "Select a valid month/year to apply Additional Surcharge", "Month & Year not selected", "Month & Year not selected"
+    period_start, period_end, period_label = bounds
+    for window in ADDITIONAL_SURCHARGE_WINDOWS:
+        if period_end >= window["start"] and period_start <= window["end"]:
+            window_label = f"{window['start'].strftime('%d-%m-%Y')} to {window['end'].strftime('%d-%m-%Y')}"
+            return window["rate"], window["note"], period_label, window_label
+    return 0.0, f"No Additional Surcharge defined for {period_label}", period_label, "No matching TNERC window"
+
+
+def calculate_monthly_additional_surcharge(month_value, year_value, iex_excess_raw, iex_excess_rounded):
+    """Compute Additional Surcharge (IEX) based on selected month/year and IEX excess energy."""
+    rate, note, period_label, window_label = _resolve_additional_surcharge_rate(month_value, year_value)
+    iex_excess_raw = iex_excess_raw or 0.0
+    iex_excess_rounded = iex_excess_rounded or 0
+    component = iex_excess_raw * rate if rate and iex_excess_raw else 0.0
+    breakdown_entry = {
+        "period_label": period_label,
+        "window_label": window_label,
+        "kwh": iex_excess_rounded,
+        "raw_kwh": iex_excess_raw,
+        "rate": rate,
+        "amount": component,
+        "note": note,
+    }
+    breakdown = [breakdown_entry]
+    return component, breakdown, rate, period_label, note
+
+
+TARIFF_OPTIONS = ["Tariff I", "Tariff II-A", "Tariff II-B", "Tariff III"]
+
+TARIFF_WINDOWS = [
+    {
+        "start": datetime(2022, 9, 10),
+        "label": "W.E.F 10.09.2022",
+        "rates": {
+            "Tariff I": {"base_rate": 6.75, "c1_c2_rate": 1.6875, "c5_rate": 0.3375, "wheeling_rate": 0.96, "cross_subsidy_rate": 1.79},
+            "Tariff II-A": {"base_rate": 7.00, "c1_c2_rate": 1.75, "c5_rate": 0.35, "wheeling_rate": 0.96, "cross_subsidy_rate": 1.95},
+            "Tariff II-B": {"base_rate": 7.50, "c1_c2_rate": 1.88, "c5_rate": 0.375, "wheeling_rate": 0.96, "cross_subsidy_rate": 2.19},
+            "Tariff III": {"base_rate": 7.50, "c1_c2_rate": 1.88, "c5_rate": 0.425, "wheeling_rate": 0.96, "cross_subsidy_rate": 2.33},
+        },
+    },
+    {
+        "start": datetime(2023, 7, 1),
+        "label": "W.E.F 01.07.2023",
+        "rates": {
+            "Tariff I": {"base_rate": 6.90, "c1_c2_rate": 1.725, "c5_rate": 0.345, "wheeling_rate": 1.0, "cross_subsidy_rate": 1.86},
+            "Tariff II-A": {"base_rate": 7.15, "c1_c2_rate": 1.7875, "c5_rate": 0.3575, "wheeling_rate": 1.0, "cross_subsidy_rate": 2.02},
+            "Tariff II-B": {"base_rate": 7.65, "c1_c2_rate": 1.91, "c5_rate": 0.383, "wheeling_rate": 1.0, "cross_subsidy_rate": 2.27},
+            "Tariff III": {"base_rate": 8.70, "c1_c2_rate": 2.175, "c5_rate": 0.435, "wheeling_rate": 1.0, "cross_subsidy_rate": 2.41},
+        },
+    },
+    {
+        "start": datetime(2024, 7, 1),
+        "label": "W.E.F 01.07.2024",
+        "rates": {
+            "Tariff I": {"base_rate": 7.25, "c1_c2_rate": 1.8125, "c5_rate": 0.3625, "wheeling_rate": 1.04, "cross_subsidy_rate": 1.92},
+            "Tariff II-A": {"base_rate": 7.50, "c1_c2_rate": 1.875, "c5_rate": 0.375, "wheeling_rate": 1.04, "cross_subsidy_rate": 2.11},
+            "Tariff II-B": {"base_rate": 8.00, "c1_c2_rate": 2.0, "c5_rate": 0.4, "wheeling_rate": 1.04, "cross_subsidy_rate": 2.36},
+            "Tariff III": {"base_rate": 9.10, "c1_c2_rate": 2.275, "c5_rate": 0.455, "wheeling_rate": 1.04, "cross_subsidy_rate": 2.49},
+        },
+    },
+    {
+        "start": datetime(2025, 7, 1),
+        "label": "W.E.F 01.07.2025",
+        "rates": {
+            "Tariff I": {"base_rate": 7.50, "c1_c2_rate": 1.875, "c5_rate": 0.375, "wheeling_rate": 1.04, "cross_subsidy_rate": 1.99},
+            "Tariff II-A": {"base_rate": 7.75, "c1_c2_rate": 1.9375, "c5_rate": 0.3875, "wheeling_rate": 1.04, "cross_subsidy_rate": 1.99},
+            "Tariff II-B": {"base_rate": 8.25, "c1_c2_rate": 2.06, "c5_rate": 0.413, "wheeling_rate": 1.04, "cross_subsidy_rate": 2.46},
+            "Tariff III": {"base_rate": 9.40, "c1_c2_rate": 2.35, "c5_rate": 0.47, "wheeling_rate": 1.04, "cross_subsidy_rate": 2.57},
+        },
+    },
+]
+
+
+def _resolve_tariff_window(target_date: datetime):
+    windows = sorted(TARIFF_WINDOWS, key=lambda w: w["start"])
+    for idx, window in enumerate(windows):
+        start = window["start"]
+        if idx + 1 < len(windows):
+            end = windows[idx + 1]["start"] - timedelta(days=1)
+        else:
+            end = datetime(2999, 12, 31)
+        if target_date >= start and target_date <= end:
+            return window, start, end
+    return windows[-1], windows[-1]["start"], datetime(2999, 12, 31)
+
+
+def resolve_tariff_rates(tariff_choice, month_value, year_value):
+    bounds = _get_month_period_bounds(month_value, year_value)
+    if bounds:
+        period_start, _, period_label = bounds
+        reference_date = period_start
+    else:
+        reference_date = datetime.today()
+        period_label = "Month & Year not selected"
+
+    window, _, _ = _resolve_tariff_window(reference_date)
+    selected_tariff = tariff_choice if tariff_choice in TARIFF_OPTIONS else TARIFF_OPTIONS[0]
+    rates = window["rates"].get(selected_tariff, window["rates"][TARIFF_OPTIONS[0]]).copy()
+    rates.update({
+        "tariff": selected_tariff,
+        "window_label": window["label"],
+        "period_label": period_label,
+    })
+    return rates
+
+# Default no-op updater stub and callables. We define these first and then
+# attempt to overwrite them with real implementations if `auto_updater` is
+# available. Defining them first avoids redeclaration warnings from static
+# analyzers.
+class _UpdaterStub:
+    def __init__(self) -> None:
+        self.config = {}
+
+    def check_for_updates(self, *args, **kwargs):
+        return None
+
+    def download_update(self, *args, **kwargs):
+        return None
+
+    def apply_update(self, *args, **kwargs):
+        return False
+
+# Placeholders for the real implementations (if available). We keep these
+# internal so that the public API functions below have a single declaration
+# (avoids redeclaration diagnostics from static analyzers).
+_initialize_updater_impl: Callable[..., Any] = None  # type: ignore
+_manual_update_check_impl: Callable[..., Any] = None  # type: ignore
+_show_update_settings_impl: Callable[..., Any] = None  # type: ignore
+UPDATER_AVAILABLE = False
+
+# If the optional `auto_updater` package is installed, import into internal
+# names and mark UPDATER_AVAILABLE. Use temporary names and cast to Any to
+# avoid strict signature/type mismatch diagnostics.
 try:
-    from auto_updater import initialize_updater, manual_update_check, show_update_settings
+    from auto_updater import (
+        initialize_updater as _real_initialize_updater,
+        manual_update_check as _real_manual_update_check,
+        show_update_settings as _real_show_update_settings,
+    )
+    _initialize_updater_impl = _real_initialize_updater  # type: Any
+    _manual_update_check_impl = _real_manual_update_check  # type: Any
+    _show_update_settings_impl = _real_show_update_settings  # type: Any
     UPDATER_AVAILABLE = True
-except ImportError:
+except Exception:
+    # Keep the internal impls as None; we will fall back to stubs in wrappers
     UPDATER_AVAILABLE = False
+
+# Public wrapper functions (single declaration each) that delegate to the
+# real implementations when available, otherwise use safe fallbacks.
+def initialize_updater(current_version: str = "1.0.0") -> Any:
+    if _initialize_updater_impl is not None:
+        return _initialize_updater_impl(current_version)
+    return _UpdaterStub()
+
+
+def manual_update_check(*args, **kwargs) -> Any:
+    if _manual_update_check_impl is not None:
+        return _manual_update_check_impl(*args, **kwargs)
+    return None
+
+
+def show_update_settings(*args, **kwargs) -> Any:
+    if _show_update_settings_impl is not None:
+        return _show_update_settings_impl(*args, **kwargs)
+    return None
 
 # Set page config
 st.set_page_config(
@@ -37,7 +266,7 @@ if 'error_message' not in st.session_state:
 
 def process_energy_data(generated_files, cpp_files, consumed_files,
                        enable_iex, enable_cpp, t_and_d_loss, cpp_t_and_d_loss,
-                       consumer_number, consumer_name, multiplication_factor,
+                       consumer_number, consumer_name, multiplication_factor, tariff_selection,
                        auto_detect_month, month, year, date_filter):
     """Process energy data files and return calculation results"""
     try:
@@ -327,10 +556,16 @@ def process_energy_data(generated_files, cpp_files, consumed_files,
         merged['is_missing_cons'] = ~merged.apply(lambda row: (row['Slot_Date'], row['Slot_Time']) in cons_slots_set, axis=1)
         
         if enable_iex:
-            merged.loc[merged['is_missing_iex'], 'Missing_Info'] += '[Missing in I.E.X] '
+            merged.loc[merged['is_missing_iex'], 'Missing_Info'] = (
+                merged.loc[merged['is_missing_iex'], 'Missing_Info'].astype(str) + '[Missing in I.E.X] '
+            )
         if enable_cpp:
-            merged.loc[merged['is_missing_cpp'], 'Missing_Info'] += '[Missing in C.P.P] '
-        merged.loc[merged['is_missing_cons'], 'Missing_Info'] += '[Missing in CONSUMED] '
+            merged.loc[merged['is_missing_cpp'], 'Missing_Info'] = (
+                merged.loc[merged['is_missing_cpp'], 'Missing_Info'].astype(str) + '[Missing in C.P.P] '
+            )
+        merged.loc[merged['is_missing_cons'], 'Missing_Info'] = (
+            merged.loc[merged['is_missing_cons'], 'Missing_Info'].astype(str) + '[Missing in CONSUMED] '
+        )
         merged.drop(['is_missing_iex', 'is_missing_cpp', 'is_missing_cons'], axis=1, inplace=True)
         
         # Sort merged data chronologically by Slot_Date and Slot_Time
@@ -342,7 +577,8 @@ def process_energy_data(generated_files, cpp_files, consumed_files,
             except Exception:
                 return 0
         
-        merged['Slot_Date_dt'] = pd.to_datetime(merged['Slot_Date'], format='%d/%m/%Y', errors='coerce')
+        # Be flexible with date parsing: accept various formats and day-first entries
+        merged['Slot_Date_dt'] = _robust_to_datetime(merged['Slot_Date'])
         merged['Slot_Time_min'] = merged['Slot_Time'].apply(slot_time_to_minutes)
         merged = merged.sort_values(['Slot_Date_dt', 'Slot_Time_min']).reset_index(drop=True)
         
@@ -400,60 +636,56 @@ def process_energy_data(generated_files, cpp_files, consumed_files,
         # Round the total for financial calculations to match table display values
         total_excess_financial_rounded = round_kwh_financial(total_excess)
         
+        # Resolve tariff-specific rates using selected period
+        tariff_rates = resolve_tariff_rates(tariff_selection, month, year)
+        base_rate = tariff_rates['base_rate']
+        c1_c2_rate = tariff_rates['c1_c2_rate']
+        c5_rate = tariff_rates['c5_rate']
+        cross_subsidy_rate = tariff_rates['cross_subsidy_rate']
+        wheeling_rate = tariff_rates['wheeling_rate']
+
         # Base rate for all excess energy using rounded values
-        base_rate = 7.25  # rupees per kWh
         base_amount = total_excess_financial_rounded * base_rate
         
         # Additional charges for specific TOD categories using rounded values
         c1_c2_excess_raw = tod_excess.loc[tod_excess['TOD_Category'].isin(['C1', 'C2']), 'Total_Excess'].sum()
         c1_c2_excess = round_kwh_financial(c1_c2_excess_raw)
-        c1_c2_additional = c1_c2_excess * 1.8125  # rupees per kWh
+        c1_c2_additional = c1_c2_excess * c1_c2_rate  # rupees per kWh
         
         c5_excess_raw = tod_excess.loc[tod_excess['TOD_Category'] == 'C5', 'Total_Excess'].sum()
         c5_excess = round_kwh_financial(c5_excess_raw)
-        c5_additional = c5_excess * 0.3625  # rupees per kWh
+        c5_additional = c5_excess * c5_rate  # rupees per kWh
         
         # Calculate total amount
         total_amount = base_amount + c1_c2_additional + c5_additional
-        
+
         # Calculate E-Tax (5%)
         etax = total_amount * 0.05
-        
+
         # Calculate total amount with E-Tax
         total_with_etax = total_amount + etax
-        
+
         # Calculate IEX excess for specific charges using rounded values
         iex_excess_financial_raw = merged['IEX_Excess'].sum()
         iex_excess_financial = round_kwh_financial(iex_excess_financial_raw)
-        
+
         # Calculate negative factors using rounded values
         etax_on_iex = total_excess_financial_rounded * 0.1
-        cross_subsidy_surcharge = iex_excess_financial * 1.92  # Only for IEX excess
+        cross_subsidy_surcharge = iex_excess_financial * cross_subsidy_rate  # Only for IEX excess
+
+        additional_surcharge, additional_surcharge_breakdown, additional_surcharge_rate, additional_surcharge_period_label, additional_surcharge_note = calculate_monthly_additional_surcharge(
+            month,
+            year,
+            iex_excess_financial_raw,
+            iex_excess_financial,
+        )
         
-        # Enhanced wheeling charges calculation for multiple sources
-        wheeling_charges = 0
+        # Tariff-driven wheeling charges (applied on rounded IEX excess only)
+        wheeling_charges = iex_excess_financial * wheeling_rate
         
-        # Get individual source excesses (rounded for financial calculations)
-        iex_excess_for_wheeling = round_kwh_financial(merged['IEX_Excess'].sum()) if enable_iex else 0
-        cpp_excess_for_wheeling = round_kwh_financial(merged['CPP_Excess'].sum()) if enable_cpp else 0
-        
-        # Calculate wheeling charges for IEX source (if enabled and has excess)
-        if enable_iex and iex_excess_for_wheeling > 0:
-            iex_loss_percentage = t_and_d_loss
-            iex_x_value = (iex_excess_for_wheeling * iex_loss_percentage) / (100 - iex_loss_percentage) if iex_loss_percentage < 100 else 0
-            iex_y_value = (iex_excess_for_wheeling * iex_loss_percentage / iex_x_value) + iex_excess_for_wheeling if iex_x_value != 0 else iex_excess_for_wheeling
-            wheeling_charges += iex_y_value * 1.04
-        
-        # Calculate wheeling charges for CPP source (if enabled and has excess)
-        if enable_cpp and cpp_excess_for_wheeling > 0:
-            cpp_loss_percentage = cpp_t_and_d_loss
-            cpp_x_value = (cpp_excess_for_wheeling * cpp_loss_percentage) / (100 - cpp_loss_percentage) if cpp_loss_percentage < 100 else 0
-            cpp_y_value = (cpp_excess_for_wheeling * cpp_loss_percentage / cpp_x_value) + cpp_excess_for_wheeling if cpp_x_value != 0 else cpp_excess_for_wheeling
-            wheeling_charges += cpp_y_value * 1.04
-        
-        # Calculate final amount to be collected
-        final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges)
-        
+        # Calculate final amount to be collected (Additional Surcharge is brought in less like E-Tax on IEX and Cross Subsidy)
+        final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges + additional_surcharge)
+
         # Round up final amount to next highest value
         final_amount_rounded = math.ceil(final_amount)
 
@@ -477,9 +709,16 @@ def process_energy_data(generated_files, cpp_files, consumed_files,
             'consumer_number': consumer_number,
             'consumer_name': consumer_name,
             'multiplication_factor': multiplication_factor,
+            'tariff_selection': tariff_rates['tariff'],
+            'tariff_window_label': tariff_rates['window_label'],
+            'tariff_rates': tariff_rates,
             # Financial calculation results
             'total_excess_financial_rounded': total_excess_financial_rounded,
             'base_rate': base_rate,
+            'tariff_c1_c2_rate': c1_c2_rate,
+            'tariff_c5_rate': c5_rate,
+            'tariff_cross_subsidy_rate': cross_subsidy_rate,
+            'tariff_wheeling_rate': wheeling_rate,
             'base_amount': base_amount,
             'c1_c2_excess': c1_c2_excess,
             'c1_c2_additional': c1_c2_additional,
@@ -491,6 +730,13 @@ def process_energy_data(generated_files, cpp_files, consumed_files,
             'iex_excess_financial': iex_excess_financial,
             'etax_on_iex': etax_on_iex,
             'cross_subsidy_surcharge': cross_subsidy_surcharge,
+            'additional_surcharge': additional_surcharge,
+            'additional_surcharge_breakdown': additional_surcharge_breakdown,
+            'additional_surcharge_rate': additional_surcharge_rate,
+            'additional_surcharge_period_label': additional_surcharge_period_label,
+            'additional_surcharge_note': additional_surcharge_note,
+            'additional_surcharge_kwh': iex_excess_financial,
+            'additional_surcharge_kwh_raw': iex_excess_financial_raw,
             'wheeling_charges': wheeling_charges,
             'final_amount': final_amount,
             'final_amount_rounded': final_amount_rounded,
@@ -540,9 +786,23 @@ def generate_detailed_pdf(data, pdf_data, pdf_type):
     try:
         # Import datetime for timestamp
         from datetime import datetime
-        
-        # Initialize breakdown variable at function level
-        wheeling_breakdown = []
+
+        # Ensure additional surcharge defaults exist at function scope to avoid unbound references
+        additional_surcharge = 0.0
+        additional_surcharge_breakdown = []
+
+        # Resolve tariff details for descriptive sections and fallback calculations
+        tariff_selection = data.get('tariff_selection', TARIFF_OPTIONS[0])
+        tariff_rates = data.get('tariff_rates') or resolve_tariff_rates(
+            tariff_selection,
+            data.get('month'),
+            data.get('year'),
+        )
+        base_rate = data.get('base_rate', tariff_rates['base_rate'])
+        c1_c2_rate = data.get('tariff_c1_c2_rate', tariff_rates['c1_c2_rate'])
+        c5_rate = data.get('tariff_c5_rate', tariff_rates['c5_rate'])
+        cross_subsidy_rate = data.get('tariff_cross_subsidy_rate', tariff_rates['cross_subsidy_rate'])
+        wheeling_rate = data.get('tariff_wheeling_rate', tariff_rates['wheeling_rate'])
         
         pdf = FPDF()
         pdf.set_margins(20, 20, 20)  # Set proper margins: left, top, right (20mm each)
@@ -562,6 +822,7 @@ def generate_detailed_pdf(data, pdf_data, pdf_type):
         pdf.cell(0, 8, f"Consumer Number: {data['consumer_number']}", ln=True)
         pdf.cell(0, 8, f"Consumer Name: {data['consumer_name']}", ln=True)
         pdf.cell(0, 8, f"Multiplication Factor (Consumed Energy): {data.get('multiplication_factor', 1)}", ln=True)
+        pdf.cell(0, 8, f"Tariff: {tariff_selection} ({tariff_rates.get('window_label', 'Latest')})", ln=True)
         pdf.ln(5)
         
         # Technical Parameters Section
@@ -923,10 +1184,15 @@ def generate_detailed_pdf(data, pdf_data, pdf_type):
         pdf.set_font('Arial', '', 10)
         
         # Use pre-calculated financial values if available, otherwise calculate on the fly
+        additional_surcharge = 0.0
+        additional_surcharge_breakdown = []
         if 'total_excess_financial_rounded' in data:
-            # Use pre-calculated values
             total_excess_financial_rounded = data['total_excess_financial_rounded']
             base_rate = data['base_rate']
+            c1_c2_rate = data.get('tariff_c1_c2_rate', c1_c2_rate)
+            c5_rate = data.get('tariff_c5_rate', c5_rate)
+            cross_subsidy_rate = data.get('tariff_cross_subsidy_rate', cross_subsidy_rate)
+            wheeling_rate = data.get('tariff_wheeling_rate', wheeling_rate)
             base_amount = data['base_amount']
             c1_c2_excess = data['c1_c2_excess']
             c1_c2_additional = data['c1_c2_additional']
@@ -938,117 +1204,90 @@ def generate_detailed_pdf(data, pdf_data, pdf_type):
             iex_excess_financial = data['iex_excess_financial']
             etax_on_iex = data['etax_on_iex']
             cross_subsidy_surcharge = data['cross_subsidy_surcharge']
+            additional_surcharge = data.get('additional_surcharge', 0.0)
+            additional_surcharge_breakdown = data.get('additional_surcharge_breakdown', [])
             wheeling_charges = data['wheeling_charges']
             final_amount = data['final_amount']
             final_amount_rounded = data['final_amount_rounded']
-            
-            # Also need these variables for display purposes
-            loss_percentage = data.get('t_and_d_loss', 0)
-            x_value = 0
-            y_value = total_excess_financial_rounded
-            
-            # Recalculate x_value and y_value for display
-            if loss_percentage < 100:
-                x_value = (total_excess_financial_rounded * loss_percentage) / (100 - loss_percentage)
-                if x_value != 0:
-                    y_value = (total_excess_financial_rounded * loss_percentage / x_value) + total_excess_financial_rounded
-                else:
-                    y_value = total_excess_financial_rounded
         else:
             # Calculate on the fly (fallback)
             total_excess_financial_rounded = round_kwh_summary(total_excess)
-            base_rate = 7.25  # rupees per kWh
+            base_rate = tariff_rates['base_rate']
+            c1_c2_rate = tariff_rates['c1_c2_rate']
+            c5_rate = tariff_rates['c5_rate']
+            cross_subsidy_rate = tariff_rates['cross_subsidy_rate']
+            wheeling_rate = tariff_rates['wheeling_rate']
             base_amount = total_excess_financial_rounded * base_rate
             c1_c2_excess = tod_values.get('C1', 0) + tod_values.get('C2', 0)
-            c1_c2_additional = c1_c2_excess * 1.8125  # rupees per kWh
+            c1_c2_additional = c1_c2_excess * c1_c2_rate
             c5_excess = tod_values.get('C5', 0)
-            c5_additional = c5_excess * 0.3625  # rupees per kWh
+            c5_additional = c5_excess * c5_rate
             total_amount = base_amount + c1_c2_additional + c5_additional
             etax = total_amount * 0.05
             total_with_etax = total_amount + etax
-            
+
             # Calculate IEX excess for specific charges
             iex_excess_financial_raw = 0
             if 'IEX_Excess' in pdf_data.columns:
                 iex_excess_financial_raw = pdf_data['IEX_Excess'].sum()
             elif data.get('enable_iex') and not data.get('enable_cpp'):
                 iex_excess_financial_raw = total_excess
-            
+
             iex_excess_financial = round_kwh_summary(iex_excess_financial_raw)
             etax_on_iex = total_excess_financial_rounded * 0.1
-            cross_subsidy_surcharge = iex_excess_financial * 1.92  # Only for IEX excess
-            
-            # Enhanced wheeling charges calculation for multiple sources (fallback calculation)
-            wheeling_charges = 0
-            wheeling_breakdown = []
-            
-            # Get individual source excesses for PDF calculation
-            iex_excess_pdf = round_kwh_summary(pdf_data['IEX_Excess'].sum()) if 'IEX_Excess' in pdf_data.columns else 0
-            cpp_excess_pdf = round_kwh_summary(pdf_data['CPP_Excess'].sum()) if 'CPP_Excess' in pdf_data.columns else 0
-            
-            # Calculate wheeling charges for IEX source (if enabled and has excess)
-            if data.get('enable_iex') and iex_excess_pdf > 0:
-                iex_loss_percentage = data.get('t_and_d_loss', 0)
-                iex_x_value = (iex_excess_pdf * iex_loss_percentage) / (100 - iex_loss_percentage) if iex_loss_percentage < 100 else 0
-                iex_y_value = (iex_excess_pdf * iex_loss_percentage / iex_x_value) + iex_excess_pdf if iex_x_value != 0 else iex_excess_pdf
-                iex_wheeling = iex_y_value * 1.04
-                wheeling_charges += iex_wheeling
-                wheeling_breakdown.append(('IEX', iex_excess_pdf, iex_loss_percentage, iex_x_value, iex_y_value, iex_wheeling))
-            
-            # Calculate wheeling charges for CPP source (if enabled and has excess)
-            if data.get('enable_cpp') and cpp_excess_pdf > 0:
-                cpp_loss_percentage = data.get('cpp_t_and_d_loss', 0)
-                cpp_x_value = (cpp_excess_pdf * cpp_loss_percentage) / (100 - cpp_loss_percentage) if cpp_loss_percentage < 100 else 0
-                cpp_y_value = (cpp_excess_pdf * cpp_loss_percentage / cpp_x_value) + cpp_excess_pdf if cpp_x_value != 0 else cpp_excess_pdf
-                cpp_wheeling = cpp_y_value * 1.04
-                wheeling_charges += cpp_wheeling
-                wheeling_breakdown.append(('CPP', cpp_excess_pdf, cpp_loss_percentage, cpp_x_value, cpp_y_value, cpp_wheeling))
-            
-            final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges)
+            cross_subsidy_surcharge = iex_excess_financial * cross_subsidy_rate
+
+            additional_surcharge, additional_surcharge_breakdown, additional_surcharge_rate, additional_surcharge_period_label, additional_surcharge_note = calculate_monthly_additional_surcharge(
+                data.get('month'),
+                data.get('year'),
+                iex_excess_financial_raw,
+                iex_excess_financial,
+            )
+
+            wheeling_charges = iex_excess_financial * wheeling_rate
+
+            final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges + additional_surcharge)
             final_amount_rounded = math.ceil(final_amount)
-        
+
         # Display the financial calculations with proper formatting
-        pdf.cell(0, 8, f"1. Base Rate: Total Excess Energy ({total_excess_financial_rounded} kWh) x Rs.{base_rate} = Rs.{base_amount:.2f}", ln=True)
-        pdf.cell(0, 8, f"2. C1+C2 Additional: Excess in C1+C2 ({c1_c2_excess} kWh) x Rs.1.8125 = Rs.{c1_c2_additional:.2f}", ln=True)
-        pdf.cell(0, 8, f"3. C5 Additional: Excess in C5 ({c5_excess} kWh) x Rs.0.3625 = Rs.{c5_additional:.2f}", ln=True)
+        pdf.cell(0, 8, f"1. Base Rate: Total Excess Energy ({total_excess_financial_rounded} kWh) x Rs.{base_rate:.4f} = Rs.{base_amount:.2f}", ln=True)
+        pdf.cell(0, 8, f"2. C1+C2 Additional: Excess in C1+C2 ({c1_c2_excess} kWh) x Rs.{c1_c2_rate:.4f} = Rs.{c1_c2_additional:.2f}", ln=True)
+        pdf.cell(0, 8, f"3. C5 Additional: Excess in C5 ({c5_excess} kWh) x Rs.{c5_rate:.4f} = Rs.{c5_additional:.2f}", ln=True)
         pdf.cell(0, 8, f"4. Partial Total: Rs.{base_amount:.2f} + Rs.{c1_c2_additional:.2f} + Rs.{c5_additional:.2f} = Rs.{total_amount:.2f}", ln=True)
         pdf.cell(0, 8, f"5. E-Tax (5% of Partial Total): Rs.{total_amount:.2f} x 0.05 = Rs.{etax:.2f}", ln=True)
         pdf.cell(0, 8, f"6. Subtotal with E-Tax: Rs.{total_amount:.2f} + Rs.{etax:.2f} = Rs.{total_with_etax:.2f}", ln=True)
         pdf.cell(0, 8, f"7. Less: E-Tax on IEX: Total Excess ({total_excess_financial_rounded} kWh) x Rs.0.1 = Rs.{etax_on_iex:.2f}", ln=True)
-        pdf.cell(0, 8, f"8. Less: Cross Subsidy Surcharge: IEX Excess ({iex_excess_financial} kWh) x Rs.1.92 = Rs.{cross_subsidy_surcharge:.2f}", ln=True)
+        pdf.cell(0, 8, f"8. Less: Cross Subsidy Surcharge: IEX Excess ({iex_excess_financial} kWh) x Rs.{cross_subsidy_rate:.4f} = Rs.{cross_subsidy_surcharge:.2f}", ln=True)
+        pdf.cell(0, 8, f"8a. Less: Additional Surcharge (IEX): Rs.{additional_surcharge:.2f}", ln=True)
+        pdf.cell(0, 8, f"9. Wheeling Charges: IEX Excess ({iex_excess_financial} kWh) x Rs.{wheeling_rate:.4f} = Rs.{wheeling_charges:.2f}", ln=True)
+        # If breakdown available, print details per date-range
+        if additional_surcharge_breakdown:
+            for entry in additional_surcharge_breakdown:
+                if isinstance(entry, dict):
+                    period_text = entry.get('period_label') or entry.get('window_label') or 'Selected Period'
+                    rate_value = entry.get('rate', 0.0)
+                    kwh_value = entry.get('kwh', entry.get('raw_kwh', 0))
+                    amount_value = entry.get('amount', 0.0)
+                    note_value = entry.get('note', '')
+                    pdf.cell(0, 6, f"    - {period_text}: {kwh_value} kWh x Rs.{rate_value:.2f} per kWh = Rs.{amount_value:.4f} ({note_value})", ln=True)
+                else:
+                    try:
+                        s_start, s_end, s_excess, s_paise, s_comp, s_note = entry
+                        pdf.cell(0, 6, f"    - {s_start} to {s_end}: {s_excess} kWh x Rs.{s_paise} per kWh = Rs.{s_comp:.4f} ({s_note})", ln=True)
+                    except Exception:
+                        continue
             
-        # Enhanced wheeling charges display with breakdown
-        pdf.cell(0, 8, f"9. Wheeling Charges Calculation:", ln=True)
-        
-        # Initialize breakdown if not already set
-        if 'wheeling_breakdown' not in locals():
-            wheeling_breakdown = []
-        
-        if wheeling_breakdown:
-            for i, (source, excess, loss_pct, x_val, y_val, wheeling) in enumerate(wheeling_breakdown):
-                pdf.cell(0, 8, f"9{chr(97+i*2)}. {source} Wheeling Charges Step 1:", ln=True)
-                pdf.cell(0, 8, f"    [{excess} x {loss_pct:.2f}% / (100-{loss_pct:.2f}%)] = {x_val:.4f}", ln=True)
-                pdf.cell(0, 8, f"9{chr(97+i*2+1)}. {source} Wheeling Charges Step 2:", ln=True)
-                pdf.cell(0, 8, f"    [({excess} x {loss_pct:.2f}% / {x_val:.4f}) + {excess}] x 1.04 = Rs.{wheeling:.2f}", ln=True)
-            
-            if len(wheeling_breakdown) > 1:
-                total_wheeling_components = " + ".join([f"Rs.{w[5]:.2f}" for w in wheeling_breakdown])
-                pdf.cell(0, 8, f"9z. Total Wheeling Charges: {total_wheeling_components} = Rs.{wheeling_charges:.2f}", ln=True)
-        else:
-            # Fallback to simple display if breakdown not available
-            pdf.cell(0, 8, f"9. Wheeling Charges: Rs.{wheeling_charges:.2f}", ln=True)
-        
-        # Calculate deductions total for clarity
-        deductions_total = etax_on_iex + cross_subsidy_surcharge + wheeling_charges
+        # Calculate deductions total for clarity (include Additional Surcharge)
+        deductions_total = etax_on_iex + cross_subsidy_surcharge + wheeling_charges + additional_surcharge
         pdf.cell(0, 8, f"10a. Total Amount to be Collected - Step 1:", ln=True)
-        pdf.cell(0, 8, f"     Rs.{total_with_etax:.2f} - (Rs.{etax_on_iex:.2f} + Rs.{cross_subsidy_surcharge:.2f} + Rs.{wheeling_charges:.2f})", ln=True)
+        pdf.cell(0, 8, f"     Rs.{total_with_etax:.2f} - (Rs.{etax_on_iex:.2f} + Rs.{cross_subsidy_surcharge:.2f} + Rs.{wheeling_charges:.2f} + Rs.{additional_surcharge:.2f})", ln=True)
         pdf.cell(0, 8, f"10b. Total Amount to be Collected - Step 2:", ln=True)
         pdf.cell(0, 8, f"     Rs.{total_with_etax:.2f} - Rs.{deductions_total:.2f} = Rs.{final_amount:.2f}", ln=True)
-        
+
         # Round up final amount to next highest value
         pdf.set_font('Arial', 'B', 10)  # Consistent with table data font size
         pdf.cell(0, 8, f"11. Final Amount (Rounded Up): Rs.{final_amount_rounded}", ln=True)
-        
+
         # Generate PDF bytes
         pdf_output = io.BytesIO()
         pdf_bytes = pdf.output(dest='S')
@@ -1057,7 +1296,7 @@ def generate_detailed_pdf(data, pdf_data, pdf_type):
         pdf_output.write(pdf_bytes)
         pdf_output.seek(0)
         return pdf_output.getvalue()
-        
+
     except Exception as e:
         st.error(f"Error generating detailed PDF: {str(e)}")
         return None
@@ -1065,8 +1304,29 @@ def generate_detailed_pdf(data, pdf_data, pdf_type):
 def generate_daywise_pdf(data, pdf_data):
     """Generate day-wise summary PDF"""
     try:
-        # Initialize breakdown variable at function level
-        wheeling_breakdown = []
+        # Defensive defaults for additional surcharge to satisfy static analysis
+        additional_surcharge = data.get('additional_surcharge', 0.0)
+        additional_surcharge_breakdown = data.get('additional_surcharge_breakdown', [])
+
+        # Resolve tariff metadata for rate lookups
+        tariff_selection = data.get('tariff_selection', TARIFF_OPTIONS[0])
+        tariff_rates = data.get('tariff_rates') or resolve_tariff_rates(
+            tariff_selection,
+            data.get('month'),
+            data.get('year'),
+        )
+        base_rate = data.get('base_rate', tariff_rates['base_rate'])
+        c1_c2_rate = data.get('tariff_c1_c2_rate', tariff_rates['c1_c2_rate'])
+        c5_rate = data.get('tariff_c5_rate', tariff_rates['c5_rate'])
+        cross_subsidy_rate = data.get('tariff_cross_subsidy_rate', tariff_rates['cross_subsidy_rate'])
+        wheeling_rate = data.get('tariff_wheeling_rate', tariff_rates['wheeling_rate'])
+
+        def round_kwh_summary(value):
+            try:
+                value = float(value)
+            except Exception:
+                value = 0.0
+            return int(value + 0.5) if value >= 0 else int(value - 0.5)
         
         pdf = FPDF()
         pdf.set_margins(20, 20, 20)
@@ -1085,6 +1345,7 @@ def generate_daywise_pdf(data, pdf_data):
         pdf.cell(0, 8, f"Consumer Number: {data['consumer_number']}", ln=True)
         pdf.cell(0, 8, f"Consumer Name: {data['consumer_name']}", ln=True)
         pdf.cell(0, 8, f"Multiplication Factor (Consumed Energy): {data.get('multiplication_factor', 1)}", ln=True)
+        pdf.cell(0, 8, f"Tariff: {tariff_selection} ({tariff_rates.get('window_label', 'Latest')})", ln=True)
         pdf.ln(5)
         
         # Technical Parameters Section
@@ -1249,12 +1510,14 @@ def generate_daywise_pdf(data, pdf_data):
         pdf.set_font('Arial', 'B', 14)
         pdf.cell(0, 10, 'Financial Calculations:', ln=True)
         pdf.set_font('Arial', '', 10)
-        
-        # Use pre-calculated financial values if available, otherwise calculate on the fly
+
         if 'total_excess_financial_rounded' in data:
-            # Use pre-calculated values
             total_excess_financial_rounded = data['total_excess_financial_rounded']
             base_rate = data['base_rate']
+            c1_c2_rate = data.get('tariff_c1_c2_rate', c1_c2_rate)
+            c5_rate = data.get('tariff_c5_rate', c5_rate)
+            cross_subsidy_rate = data.get('tariff_cross_subsidy_rate', cross_subsidy_rate)
+            wheeling_rate = data.get('tariff_wheeling_rate', wheeling_rate)
             base_amount = data['base_amount']
             c1_c2_excess = data['c1_c2_excess']
             c1_c2_additional = data['c1_c2_additional']
@@ -1269,101 +1532,77 @@ def generate_daywise_pdf(data, pdf_data):
             wheeling_charges = data['wheeling_charges']
             final_amount = data['final_amount']
             final_amount_rounded = data['final_amount_rounded']
-            
-            # Also need these variables for display purposes
-            loss_percentage = data.get('t_and_d_loss', 0)
-            x_value = 0
-            y_value = total_excess_financial_rounded
-            
-            # Recalculate x_value and y_value for display
-            if loss_percentage < 100:
-                x_value = (total_excess_financial_rounded * loss_percentage) / (100 - loss_percentage)
-                if x_value != 0:
-                    y_value = (total_excess_financial_rounded * loss_percentage / x_value) + total_excess_financial_rounded
-                else:
-                    y_value = total_excess_financial_rounded
         else:
-            # Calculate on the fly (fallback)
-            total_excess_financial_rounded = round_kwh(total_excess)
-            base_rate = 7.25  # rupees per kWh
+            total_excess_financial_rounded = round_kwh_summary(total_excess)
+            base_rate = tariff_rates['base_rate']
+            c1_c2_rate = tariff_rates['c1_c2_rate']
+            c5_rate = tariff_rates['c5_rate']
+            cross_subsidy_rate = tariff_rates['cross_subsidy_rate']
+            wheeling_rate = tariff_rates['wheeling_rate']
             base_amount = total_excess_financial_rounded * base_rate
             c1_c2_excess = tod_values.get('C1', 0) + tod_values.get('C2', 0)
-            c1_c2_additional = c1_c2_excess * 1.8125  # rupees per kWh
+            c1_c2_additional = c1_c2_excess * c1_c2_rate
             c5_excess = tod_values.get('C5', 0)
-            c5_additional = c5_excess * 0.3625  # rupees per kWh
+            c5_additional = c5_excess * c5_rate
             total_amount = base_amount + c1_c2_additional + c5_additional
             etax = total_amount * 0.05
             total_with_etax = total_amount + etax
-            
-            # Calculate IEX excess for specific charges
+
             iex_excess_financial_raw = 0
-            if data.get('enable_iex') and data.get('enable_cpp') and 'IEX_Excess' in pdf_data.columns:
+            if data.get('enable_iex') and 'IEX_Excess' in pdf_data.columns:
                 iex_excess_financial_raw = pdf_data['IEX_Excess'].sum()
             elif data.get('enable_iex') and not data.get('enable_cpp'):
                 iex_excess_financial_raw = total_excess
-            
-            iex_excess_financial = round_kwh(iex_excess_financial_raw)
+
+            iex_excess_financial = round_kwh_summary(iex_excess_financial_raw)
             etax_on_iex = total_excess_financial_rounded * 0.1
-            cross_subsidy_surcharge = iex_excess_financial * 1.92  # Only for IEX excess
-            
-            # Enhanced wheeling charges calculation for multiple sources (daywise fallback)
-            wheeling_charges = 0
-            wheeling_breakdown = []
-            
-            # Get individual source excesses for daywise calculations
-            iex_excess_daywise = round_kwh(pdf_data['IEX_Excess'].sum()) if 'IEX_Excess' in pdf_data.columns else 0
-            cpp_excess_daywise = round_kwh(pdf_data['CPP_Excess'].sum()) if 'CPP_Excess' in pdf_data.columns else 0
-            
-            # Calculate wheeling charges for IEX source (if enabled and has excess)
-            if data.get('enable_iex') and iex_excess_daywise > 0:
-                iex_loss_percentage = data.get('t_and_d_loss', 0)
-                iex_x_value = (iex_excess_daywise * iex_loss_percentage) / (100 - iex_loss_percentage) if iex_loss_percentage < 100 else 0
-                iex_y_value = (iex_excess_daywise * iex_loss_percentage / iex_x_value) + iex_excess_daywise if iex_x_value != 0 else iex_excess_daywise
-                iex_wheeling = iex_y_value * 1.04
-                wheeling_charges += iex_wheeling
-                wheeling_breakdown.append(('IEX', iex_excess_daywise, iex_loss_percentage, iex_x_value, iex_y_value, iex_wheeling))
-            
-            # Calculate wheeling charges for CPP source (if enabled and has excess)
-            if data.get('enable_cpp') and cpp_excess_daywise > 0:
-                cpp_loss_percentage = data.get('cpp_t_and_d_loss', 0)
-                cpp_x_value = (cpp_excess_daywise * cpp_loss_percentage) / (100 - cpp_loss_percentage) if cpp_loss_percentage < 100 else 0
-                cpp_y_value = (cpp_excess_daywise * cpp_loss_percentage / cpp_x_value) + cpp_excess_daywise if cpp_x_value != 0 else cpp_excess_daywise
-                cpp_wheeling = cpp_y_value * 1.04
-                wheeling_charges += cpp_wheeling
-                wheeling_breakdown.append(('CPP', cpp_excess_daywise, cpp_loss_percentage, cpp_x_value, cpp_y_value, cpp_wheeling))
-            
-            final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges)
+            cross_subsidy_surcharge = iex_excess_financial * cross_subsidy_rate
+
+            additional_surcharge, additional_surcharge_breakdown, additional_surcharge_rate, additional_surcharge_period_label, additional_surcharge_note = calculate_monthly_additional_surcharge(
+                data.get('month'),
+                data.get('year'),
+                iex_excess_financial_raw,
+                iex_excess_financial,
+            )
+
+            wheeling_charges = iex_excess_financial * wheeling_rate
+
+            final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges + additional_surcharge)
             final_amount_rounded = math.ceil(final_amount)
-        
-        # Display simplified financial summary for daywise PDF
-        pdf.cell(0, 8, f"1. Base Rate: Total Excess Energy ({total_excess_financial_rounded} kWh) x Rs.{base_rate} = Rs.{base_amount:.2f}", ln=True)
-        pdf.cell(0, 8, f"2. C1+C2 Additional: Excess in C1+C2 ({c1_c2_excess} kWh) x Rs.1.8125 = Rs.{c1_c2_additional:.2f}", ln=True)
-        pdf.cell(0, 8, f"3. C5 Additional: Excess in C5 ({c5_excess} kWh) x Rs.0.3625 = Rs.{c5_additional:.2f}", ln=True)
+
+        pdf.cell(0, 8, f"1. Base Rate: Total Excess Energy ({total_excess_financial_rounded} kWh) x Rs.{base_rate:.4f} = Rs.{base_amount:.2f}", ln=True)
+        pdf.cell(0, 8, f"2. C1+C2 Additional: Excess in C1+C2 ({c1_c2_excess} kWh) x Rs.{c1_c2_rate:.4f} = Rs.{c1_c2_additional:.2f}", ln=True)
+        pdf.cell(0, 8, f"3. C5 Additional: Excess in C5 ({c5_excess} kWh) x Rs.{c5_rate:.4f} = Rs.{c5_additional:.2f}", ln=True)
         pdf.cell(0, 8, f"4. Partial Total: Rs.{total_amount:.2f}", ln=True)
         pdf.cell(0, 8, f"5. E-Tax (5%): Rs.{etax:.2f}", ln=True)
         pdf.cell(0, 8, f"6. Subtotal with E-Tax: Rs.{total_with_etax:.2f}", ln=True)
         pdf.cell(0, 8, f"7. Less: E-Tax on IEX: Rs.{etax_on_iex:.2f}", ln=True)
-        pdf.cell(0, 8, f"8. Less: Cross Subsidy Surcharge: Rs.{cross_subsidy_surcharge:.2f}", ln=True)
-            
-        # Enhanced wheeling charges display (simplified for daywise PDF)
-        pdf.cell(0, 8, f"9. Wheeling Charges Calculation:", ln=True)
-        if wheeling_breakdown:
-            for i, (source, excess, loss_pct, x_val, y_val, wheeling) in enumerate(wheeling_breakdown):
-                pdf.cell(0, 8, f"9{chr(97+i)}. {source}: [{excess} x {loss_pct:.2f}% / (100-{loss_pct:.2f}%)] x 1.04 = Rs.{wheeling:.2f}", ln=True)
-            
-            if len(wheeling_breakdown) > 1:
-                total_wheeling_components = " + ".join([f"Rs.{w[5]:.2f}" for w in wheeling_breakdown])
-                pdf.cell(0, 8, f"9z. Total Wheeling Charges: {total_wheeling_components} = Rs.{wheeling_charges:.2f}", ln=True)
-        else:
-            pdf.cell(0, 8, f"9. Wheeling Charges: Rs.{wheeling_charges:.2f}", ln=True)
-        
-        # Calculate deductions total for clarity
-        deductions_total = etax_on_iex + cross_subsidy_surcharge + wheeling_charges
-        
+        pdf.cell(0, 8, f"8. Less: Cross Subsidy Surcharge: {iex_excess_financial} kWh x Rs.{cross_subsidy_rate:.4f} = Rs.{cross_subsidy_surcharge:.2f}", ln=True)
+        pdf.cell(0, 8, f"8a. Less: Additional Surcharge (IEX): Rs.{additional_surcharge:.2f}", ln=True)
+        if additional_surcharge_breakdown:
+            for entry in additional_surcharge_breakdown:
+                if isinstance(entry, dict):
+                    period_text = entry.get('period_label') or entry.get('window_label') or 'Selected Period'
+                    rate_value = entry.get('rate', 0.0)
+                    kwh_value = entry.get('kwh', entry.get('raw_kwh', 0))
+                    amount_value = entry.get('amount', 0.0)
+                    note_value = entry.get('note', '')
+                    pdf.cell(0, 6, f"    - {period_text}: {kwh_value} kWh x Rs.{rate_value:.2f} per kWh = Rs.{amount_value:.4f} ({note_value})", ln=True)
+                else:
+                    try:
+                        s_start, s_end, s_excess, s_paise, s_comp, s_note = entry
+                        pdf.cell(0, 6, f"    - {s_start} to {s_end}: {s_excess} kWh x Rs.{s_paise} per kWh = Rs.{s_comp:.4f} ({s_note})", ln=True)
+                    except Exception:
+                        continue
+
+        pdf.cell(0, 8, f"9. Wheeling Charges: {iex_excess_financial} kWh x Rs.{wheeling_rate:.4f} = Rs.{wheeling_charges:.2f}", ln=True)
+
+        deductions_total = etax_on_iex + cross_subsidy_surcharge + wheeling_charges + additional_surcharge
+
         pdf.set_font('Arial', 'B', 10)
         pdf.cell(0, 8, f"10. Final Amount: Rs.{total_with_etax:.2f} - Rs.{deductions_total:.2f} = Rs.{final_amount:.2f}", ln=True)
         pdf.cell(0, 8, f"11. Final Amount (Rounded Up): Rs.{final_amount_rounded}", ln=True)
-        
+
         # Generate PDF bytes
         pdf_output = io.BytesIO()
         pdf_bytes = pdf.output(dest='S')
@@ -1372,7 +1611,7 @@ def generate_daywise_pdf(data, pdf_data):
         pdf_output.write(pdf_bytes)
         pdf_output.seek(0)
         return pdf_output.getvalue()
-        
+
     except Exception as e:
         st.error(f"Error generating daywise PDF: {str(e)}")
         return None
@@ -1397,6 +1636,13 @@ def generate_simple_pdf(data, pdf_type="excess"):
         pdf.cell(0, 8, f'Consumer Number: {data["consumer_number"]}', ln=True)
         pdf.cell(0, 8, f'Consumer Name: {data["consumer_name"]}', ln=True)
         pdf.cell(0, 8, f'Multiplication Factor: {data["multiplication_factor"]}', ln=True)
+        tariff_selection = data.get('tariff_selection', TARIFF_OPTIONS[0])
+        tariff_rates = data.get('tariff_rates') or resolve_tariff_rates(
+            tariff_selection,
+            data.get('month'),
+            data.get('year'),
+        )
+        pdf.cell(0, 8, f'Tariff: {tariff_selection} ({tariff_rates.get("window_label", "Latest")})', ln=True)
         pdf.ln(5)
         
         # Technical Parameters
@@ -1536,6 +1782,13 @@ with st.form("energy_adjustment_form"):
         format="%.2f",
         help="Factor to multiply consumed energy values"
     )
+
+    tariff_selection = st.selectbox(
+        "Tariff Selection",
+        options=TARIFF_OPTIONS,
+        index=0,
+        help="Choose the applicable tariff so that all dependent rates update automatically"
+    )
     
     # Date Filters
     st.subheader("Date Filters")
@@ -1587,9 +1840,10 @@ with st.form("energy_adjustment_form"):
             st.write(f"- T&D Loss: {cpp_t_and_d_loss}%")
     
     with col3:
-        st.write("**Consumption:**")
+        st.write("**Consumption & Billing:**")
         st.write(f"- Files: {len(consumed_files) if consumed_files else 0}")
         st.write(f"- Factor: {multiplication_factor}")
+        st.write(f"- Tariff: {tariff_selection}")
     
     # Submit button
     submitted = st.form_submit_button("Generate PDF Report", type="primary")
@@ -1651,7 +1905,7 @@ if submitted:
                 result = process_energy_data(
                     generated_files, cpp_files, consumed_files,
                     enable_iex, enable_cpp, t_and_d_loss, cpp_t_and_d_loss,
-                    consumer_number, consumer_name, multiplication_factor,
+                    consumer_number, consumer_name, multiplication_factor, tariff_selection,
                     auto_detect_month, month, year, date_filter
                 )
                 
@@ -1704,105 +1958,148 @@ if st.session_state.processed_data:
     
     # Check if financial calculation data is available
     if 'total_excess_financial_rounded' in data:
-        # Display financial calculations in organized columns
         col1, col2 = st.columns(2)
-        
+
+        additional_surcharge_value = data.get('additional_surcharge', 0.0)
+        additional_surcharge_rate = data.get('additional_surcharge_rate', 0.0)
+        additional_surcharge_period_label = data.get('additional_surcharge_period_label') or "Selected Period"
+        additional_surcharge_note = data.get('additional_surcharge_note', '')
+        additional_surcharge_kwh = data.get('additional_surcharge_kwh', data.get('iex_excess_financial', 0))
+
+        tariff_label = data.get('tariff_selection', TARIFF_OPTIONS[0])
+        tariff_window_label = data.get('tariff_window_label', '')
+        tariff_c1_c2_rate = data.get('tariff_c1_c2_rate', data.get('tariff_rates', {}).get('c1_c2_rate', 0))
+        tariff_c5_rate = data.get('tariff_c5_rate', data.get('tariff_rates', {}).get('c5_rate', 0))
+        tariff_cross_subsidy_rate = data.get('tariff_cross_subsidy_rate', data.get('tariff_rates', {}).get('cross_subsidy_rate', 0))
+        tariff_wheeling_rate = data.get('tariff_wheeling_rate', data.get('tariff_rates', {}).get('wheeling_rate', 0))
+
+        st.info(f"**Tariff Applied:** {tariff_label} ({tariff_window_label or 'Latest Tariff'})")
+
         with col1:
             st.write("**Positive Charges:**")
-            st.info(f"**Base Rate:** {data['total_excess_financial_rounded']} kWh × Rs.{data['base_rate']} = Rs.{data['base_amount']:.2f}")
-            st.info(f"**C1+C2 Additional:** {data['c1_c2_excess']} kWh × Rs.1.8125 = Rs.{data['c1_c2_additional']:.2f}")
-            st.info(f"**C5 Additional:** {data['c5_excess']} kWh × Rs.0.3625 = Rs.{data['c5_additional']:.2f}")
+            st.info(f"**Base Rate:** {data['total_excess_financial_rounded']} kWh × Rs.{data['base_rate']:.4f} = Rs.{data['base_amount']:.2f}")
+            st.info(f"**C1+C2 Additional:** {data['c1_c2_excess']} kWh × Rs.{tariff_c1_c2_rate:.4f} = Rs.{data['c1_c2_additional']:.2f}")
+            st.info(f"**C5 Additional:** {data['c5_excess']} kWh × Rs.{tariff_c5_rate:.4f} = Rs.{data['c5_additional']:.2f}")
             st.info(f"**Subtotal:** Rs.{data['total_amount']:.2f}")
             st.info(f"**E-Tax (5%):** Rs.{data['etax']:.2f}")
             st.success(f"**Total with E-Tax:** Rs.{data['total_with_etax']:.2f}")
-        
+
         with col2:
             st.write("**Negative Charges (Deductions):**")
             st.warning(f"**E-Tax on IEX:** Rs.{data['etax_on_iex']:.2f}")
-            st.warning(f"**Cross Subsidy Surcharge:** {data['iex_excess_financial']} kWh × Rs.1.92 = Rs.{data['cross_subsidy_surcharge']:.2f}")
-            st.warning(f"**Wheeling Charges:** Rs.{data['wheeling_charges']:.2f}")
-            st.warning(f"**Total Deductions:** Rs.{data['etax_on_iex'] + data['cross_subsidy_surcharge'] + data['wheeling_charges']:.2f}")
+            st.warning(f"**Cross Subsidy Surcharge:** {data['iex_excess_financial']} kWh × Rs.{tariff_cross_subsidy_rate:.4f} = Rs.{data['cross_subsidy_surcharge']:.2f}")
+            st.warning(f"**Wheeling Charges:** {data['iex_excess_financial']} kWh × Rs.{tariff_wheeling_rate:.4f} = Rs.{data['wheeling_charges']:.2f}")
+            if additional_surcharge_value > 0:
+                st.warning(
+                    f"**Additional Surcharge (IEX):** {additional_surcharge_kwh} kWh × Rs.{additional_surcharge_rate:.2f}"
+                    f" = Rs.{additional_surcharge_value:.2f} ({additional_surcharge_period_label})"
+                )
+            else:
+                st.info(
+                    f"**Additional Surcharge (IEX):** Not applied. {additional_surcharge_note or 'Select a month & year covered by a TNERC window.'}"
+                )
+
+            total_deductions = data['etax_on_iex'] + data['cross_subsidy_surcharge'] + data['wheeling_charges'] + additional_surcharge_value
+            st.warning(f"**Total Deductions:** Rs.{total_deductions:.2f}")
             st.success(f"**Final Amount:** Rs.{data['final_amount']:.2f}")
             st.success(f"**Final Amount (Rounded Up):** Rs.{data['final_amount_rounded']}")
     else:
         # Fallback to calculating on the fly if the pre-calculated values aren't available
         # Calculate financial values using rounded values for consistency
         total_excess_financial_rounded = round_kwh_financial(data['total_excess'])
-        
-        # Base rate for all excess energy using rounded values
-        base_rate = 7.25  # rupees per kWh
+
+        fallback_tariff = data.get('tariff_rates') or resolve_tariff_rates(
+            data.get('tariff_selection', TARIFF_OPTIONS[0]),
+            data.get('month'),
+            data.get('year'),
+        )
+
+        base_rate = fallback_tariff['base_rate']
+        c1_c2_rate = fallback_tariff['c1_c2_rate']
+        c5_rate = fallback_tariff['c5_rate']
+        cross_subsidy_rate = fallback_tariff['cross_subsidy_rate']
+        wheeling_rate = fallback_tariff['wheeling_rate']
         base_amount = total_excess_financial_rounded * base_rate
-        
+
         # Calculate TOD-wise excess for financial calculations
         merged_data = data.get('merged_all', pd.DataFrame())
+        additional_surcharge = 0.0
+        additional_surcharge_breakdown = []
+        additional_surcharge_rate = 0.0
+        additional_surcharge_period_label = "Month & Year not selected"
+        additional_surcharge_note = "Select a valid month & year to apply Additional Surcharge"
         if not merged_data.empty:
             tod_excess = merged_data.groupby('TOD_Category')['Total_Excess'].sum().reset_index()
-            
+
             # Additional charges for specific TOD categories using rounded values
             c1_c2_excess_raw = tod_excess.loc[tod_excess['TOD_Category'].isin(['C1', 'C2']), 'Total_Excess'].sum()
             c1_c2_excess = round_kwh_financial(c1_c2_excess_raw)
-            c1_c2_additional = c1_c2_excess * 1.8125  # rupees per kWh
-            
+            c1_c2_additional = c1_c2_excess * c1_c2_rate  # rupees per kWh
+
             c5_excess_raw = tod_excess.loc[tod_excess['TOD_Category'] == 'C5', 'Total_Excess'].sum()
             c5_excess = round_kwh_financial(c5_excess_raw)
-            c5_additional = c5_excess * 0.3625  # rupees per kWh
-            
+            c5_additional = c5_excess * c5_rate  # rupees per kWh
+
             # Calculate total amount
             total_amount = base_amount + c1_c2_additional + c5_additional
-            
+
             # Calculate E-Tax (5% of total amount)
             etax = total_amount * 0.05
-            
+
             # Calculate total amount with E-Tax
             total_with_etax = total_amount + etax
-            
+
             # Calculate IEX excess for specific charges using rounded values
             iex_excess_financial_raw = merged_data['IEX_Excess'].sum() if 'IEX_Excess' in merged_data.columns else data['total_excess']
             iex_excess_financial = round_kwh_financial(iex_excess_financial_raw)
-            
+
             # Calculate negative factors using rounded values
             etax_on_iex = total_excess_financial_rounded * 0.1
-            cross_subsidy_surcharge = iex_excess_financial * 1.92  # Only for IEX excess
-            
-            # Use the complex wheeling charges formula from Flask app
-            loss_percentage = data.get('t_and_d_loss', 0)
-            # Ensure loss_percentage is not 100 to avoid division by zero
-            if loss_percentage < 100:
-                x_value = (total_excess_financial_rounded * loss_percentage) / (100 - loss_percentage)
-                # Ensure x_value is not zero to avoid division by zero
-                if x_value != 0:
-                    y_value = (total_excess_financial_rounded * loss_percentage / x_value) + total_excess_financial_rounded
-                else:
-                    y_value = total_excess_financial_rounded
-            else:
-                x_value = 0
-                y_value = total_excess_financial_rounded
-            wheeling_charges = y_value * 1.04
-            
-            # Calculate final amount to be collected
-            final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges)
-            
+            cross_subsidy_surcharge = iex_excess_financial * cross_subsidy_rate  # Only for IEX excess
+            additional_surcharge, additional_surcharge_breakdown, additional_surcharge_rate, additional_surcharge_period_label, additional_surcharge_note = calculate_monthly_additional_surcharge(
+                data.get('month'),
+                data.get('year'),
+                iex_excess_financial_raw,
+                iex_excess_financial,
+            )
+
+            # Tariff-driven wheeling charges
+            wheeling_charges = iex_excess_financial * wheeling_rate
+
+            # Calculate final amount to be collected (include Additional Surcharge as deduction)
+            final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges + additional_surcharge)
+
             # Round up final amount to next highest value
             final_amount_rounded = math.ceil(final_amount)
-            
+
             # Display financial calculations in organized columns
             col1, col2 = st.columns(2)
-            
+
             with col1:
                 st.write("**Positive Charges:**")
-                st.info(f"**Base Rate:** {total_excess_financial_rounded} kWh × Rs.{base_rate} = Rs.{base_amount:.2f}")
-                st.info(f"**C1+C2 Additional:** {c1_c2_excess} kWh × Rs.1.8125 = Rs.{c1_c2_additional:.2f}")
-                st.info(f"**C5 Additional:** {c5_excess} kWh × Rs.0.3625 = Rs.{c5_additional:.2f}")
+                st.info(f"**Base Rate:** {total_excess_financial_rounded} kWh × Rs.{base_rate:.4f} = Rs.{base_amount:.2f}")
+                st.info(f"**C1+C2 Additional:** {c1_c2_excess} kWh × Rs.{c1_c2_rate:.4f} = Rs.{c1_c2_additional:.2f}")
+                st.info(f"**C5 Additional:** {c5_excess} kWh × Rs.{c5_rate:.4f} = Rs.{c5_additional:.2f}")
                 st.info(f"**Subtotal:** Rs.{total_amount:.2f}")
                 st.info(f"**E-Tax (5%):** Rs.{etax:.2f}")
                 st.success(f"**Total with E-Tax:** Rs.{total_with_etax:.2f}")
-            
+
             with col2:
                 st.write("**Negative Charges (Deductions):**")
                 st.warning(f"**E-Tax on IEX:** Rs.{etax_on_iex:.2f}")
-                st.warning(f"**Cross Subsidy Surcharge:** {iex_excess_financial} kWh × Rs.1.92 = Rs.{cross_subsidy_surcharge:.2f}")
-                st.warning(f"**Wheeling Charges:** Rs.{wheeling_charges:.2f}")
-                st.warning(f"**Total Deductions:** Rs.{etax_on_iex + cross_subsidy_surcharge + wheeling_charges:.2f}")
+                st.warning(f"**Cross Subsidy Surcharge:** {iex_excess_financial} kWh × Rs.{cross_subsidy_rate:.4f} = Rs.{cross_subsidy_surcharge:.2f}")
+                st.warning(f"**Wheeling Charges:** {iex_excess_financial} kWh × Rs.{wheeling_rate:.4f} = Rs.{wheeling_charges:.2f}")
+                if additional_surcharge > 0:
+                    st.warning(
+                        f"**Additional Surcharge (IEX):** {iex_excess_financial} kWh × Rs.{additional_surcharge_rate:.2f}"
+                        f" = Rs.{additional_surcharge:.2f} ({additional_surcharge_period_label})"
+                    )
+                else:
+                    st.info(
+                        f"**Additional Surcharge (IEX):** Not applied. {additional_surcharge_note or 'Select a month & year covered by a TNERC window.'}"
+                    )
+                total_deductions = etax_on_iex + cross_subsidy_surcharge + wheeling_charges + additional_surcharge
+                st.warning(f"**Total Deductions:** Rs.{total_deductions:.2f}")
                 st.success(f"**Final Amount:** Rs.{final_amount:.2f}")
                 st.success(f"**Final Amount (Rounded Up):** Rs.{final_amount_rounded}")
         else:
