@@ -6,7 +6,6 @@ enableXsrfProtection = false
 
 [browser]
 gatherUsageStats = false
-showErrorDetails = true
 
 [theme]
 primaryColor = "#FF6B6B"

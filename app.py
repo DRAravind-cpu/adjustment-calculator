@@ -5,7 +5,42 @@ import io
 import os
 import math
 
+PDF_AUTHOR_NAME = "Er.Aravind MRT VREDC"
+
+
+class AuthorPDF(FPDF):
+    def __init__(self, author_name=PDF_AUTHOR_NAME, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.author_name = author_name
+
+    def header(self):
+        if self.author_name:
+            self.set_font('Arial', 'I', 10)
+            self.set_text_color(80, 80, 80)
+            self.cell(0, 10, self.author_name, 0, 0, 'R')
+            self.ln(5)
+            self.set_text_color(0, 0, 0)
+
+
 app = Flask(__name__)
+
+
+WHEELING_RATE_PER_KWH = 2.34
+
+
+def compute_wheeling_components(total_excess_kwh, t_and_d_loss_percent):
+    """Return (reference_kwh, charges) for wheeling deduction."""
+    try:
+        loss_pct = float(t_and_d_loss_percent or 0)
+    except Exception:
+        loss_pct = 0.0
+
+    reference_kwh = 0.0
+    if loss_pct > 0 and loss_pct < 100:
+        reference_kwh = (total_excess_kwh * loss_pct) / (100 - loss_pct)
+
+    charges = reference_kwh * WHEELING_RATE_PER_KWH
+    return reference_kwh, charges
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -743,25 +778,10 @@ def index():
         etax_on_iex = total_excess_financial_rounded * 0.1
         cross_subsidy_surcharge = iex_excess_financial * 1.92  # Only for IEX excess
         
-        # Enhanced wheeling charges calculation for multiple sources (for return data)
-        wheeling_charges = 0
-        
-        # Calculate wheeling charges for IEX source (if enabled and has excess)
-        if enable_iex and iex_excess_financial > 0:
-            iex_loss_percentage = t_and_d_loss
-            iex_x_value = (iex_excess_financial * iex_loss_percentage) / (100 - iex_loss_percentage) if iex_loss_percentage < 100 else 0
-            iex_y_value = (iex_excess_financial * iex_loss_percentage / iex_x_value) + iex_excess_financial if iex_x_value != 0 else iex_excess_financial
-            wheeling_charges += iex_y_value * 1.04
-        
-        # Calculate wheeling charges for CPP source (if enabled and has excess)
-        if enable_cpp:
-            cpp_excess_financial_raw = merged['CPP_Excess'].sum()
-            cpp_excess_financial = round_kwh_financial(cpp_excess_financial_raw)
-            if cpp_excess_financial > 0:
-                cpp_loss_percentage = cpp_t_and_d_loss
-                cpp_x_value = (cpp_excess_financial * cpp_loss_percentage) / (100 - cpp_loss_percentage) if cpp_loss_percentage < 100 else 0
-                cpp_y_value = (cpp_excess_financial * cpp_loss_percentage / cpp_x_value) + cpp_excess_financial if cpp_x_value != 0 else cpp_excess_financial
-                wheeling_charges += cpp_y_value * 1.04
+        wheeling_reference_kwh, wheeling_charges = compute_wheeling_components(
+            total_excess_financial_rounded,
+            t_and_d_loss,
+        )
         
         # Calculate final amount to be collected
         final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges)
@@ -864,7 +884,7 @@ def index():
             # Import datetime for timestamp
             from datetime import datetime
             
-            pdf = FPDF()
+            pdf = AuthorPDF()
             pdf.set_margins(20, 20, 20)  # Set proper margins: left, top, right (20mm each)
             pdf.set_auto_page_break(auto=True, margin=20)  # Auto page break with bottom margin
             pdf.add_page()
@@ -1265,12 +1285,8 @@ def index():
             pdf.cell(50, 10, f"{c_total_rounded}", 1)
             pdf.ln()
             
-            # Add financial calculations
-            # Check if we need a new page for financial calculations (but don't add table headers)
-            if pdf.get_y() > 180:  # Need space for financial calculations
-                pdf.add_page()
-            
-            pdf.ln(5)
+            # Add financial calculations on a dedicated page
+            pdf.add_page()
             pdf.set_font('Arial', 'B', 14)  # Standardized heading font size
             pdf.cell(0, 10, 'Financial Calculations:', ln=True)
             pdf.set_font('Arial', '', 10)  # Consistent with table data font size
@@ -1340,43 +1356,12 @@ def index():
             cross_subsidy_surcharge = iex_excess_rounded * 1.92
             pdf.cell(0, 8, f"8. Cross Subsidy Surcharge: IEX Excess ({iex_excess_rounded} kWh) x Rs.1.92 = Rs.{cross_subsidy_surcharge:.2f}", ln=True)
             
-            # Enhanced wheeling charges calculation for multiple sources
-            wheeling_charges = 0
-            wheeling_breakdown = []
-            
-            # Get individual source excesses (rounded for financial calculations)
-            iex_excess_for_wheeling = round_kwh_financial(merged['IEX_Excess'].sum())
-            cpp_excess_for_wheeling = round_kwh_financial(merged['CPP_Excess'].sum()) if enable_cpp else 0
-            
-            # Calculate wheeling charges for IEX source (if enabled and has excess)
-            if enable_iex and iex_excess_for_wheeling > 0:
-                iex_loss_percentage = t_and_d_loss
-                iex_x_value = (iex_excess_for_wheeling * iex_loss_percentage) / (100 - iex_loss_percentage) if iex_loss_percentage < 100 else 0
-                iex_y_value = (iex_excess_for_wheeling * iex_loss_percentage / iex_x_value) + iex_excess_for_wheeling if iex_x_value != 0 else iex_excess_for_wheeling
-                iex_wheeling = iex_y_value * 1.04
-                wheeling_charges += iex_wheeling
-                wheeling_breakdown.append(('IEX', iex_excess_for_wheeling, iex_loss_percentage, iex_x_value, iex_y_value, iex_wheeling))
-            
-            # Calculate wheeling charges for CPP source (if enabled and has excess)
-            if enable_cpp and cpp_excess_for_wheeling > 0:
-                cpp_loss_percentage = cpp_t_and_d_loss
-                cpp_x_value = (cpp_excess_for_wheeling * cpp_loss_percentage) / (100 - cpp_loss_percentage) if cpp_loss_percentage < 100 else 0
-                cpp_y_value = (cpp_excess_for_wheeling * cpp_loss_percentage / cpp_x_value) + cpp_excess_for_wheeling if cpp_x_value != 0 else cpp_excess_for_wheeling
-                cpp_wheeling = cpp_y_value * 1.04
-                wheeling_charges += cpp_wheeling
-                wheeling_breakdown.append(('CPP', cpp_excess_for_wheeling, cpp_loss_percentage, cpp_x_value, cpp_y_value, cpp_wheeling))
+            wheeling_reference_kwh, wheeling_charges = compute_wheeling_components(
+                total_excess_rounded_fin,
+                t_and_d_loss,
+            )
 
-            # Display wheeling charges calculation breakdown
-            pdf.cell(0, 8, f"9. Wheeling Charges Calculation:", ln=True)
-            for i, (source, excess, loss_pct, x_val, y_val, wheeling) in enumerate(wheeling_breakdown):
-                pdf.cell(0, 8, f"9{chr(97+i*2)}. {source} Wheeling Charges Step 1:", ln=True)
-                pdf.cell(0, 8, f"    [{excess} x {loss_pct:.2f}% / (100-{loss_pct:.2f}%)] = {x_val:.4f}", ln=True)
-                pdf.cell(0, 8, f"9{chr(97+i*2+1)}. {source} Wheeling Charges Step 2:", ln=True)
-                pdf.cell(0, 8, f"    [({excess} x {loss_pct:.2f}% / {x_val:.4f}) + {excess}] x 1.04 = Rs.{wheeling:.2f}", ln=True)
-            
-            if len(wheeling_breakdown) > 1:
-                total_wheeling_components = " + ".join([f"Rs.{w[5]:.2f}" for w in wheeling_breakdown])
-                pdf.cell(0, 8, f"9z. Total Wheeling Charges: {total_wheeling_components} = Rs.{wheeling_charges:.2f}", ln=True)
+            pdf.cell(0, 8, f"9. Wheeling Charges: Adj. Loss Component ({wheeling_reference_kwh:.2f} kWh) x Rs.{WHEELING_RATE_PER_KWH:.2f} = Rs.{wheeling_charges:.2f}", ln=True)
 
             # Calculate final amount to be collected with detailed breakdown
             final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges)
@@ -1445,7 +1430,7 @@ def index():
             from datetime import datetime, timedelta
             import pandas as pd
             
-            pdf = FPDF()
+            pdf = AuthorPDF()
             pdf.set_margins(20, 20, 20)  # Set proper margins: left, top, right (20mm each)
             pdf.set_auto_page_break(auto=True, margin=20)  # Auto page break with bottom margin
             pdf.add_page()
@@ -1756,8 +1741,8 @@ def index():
                 pdf.cell(50, 10, f"{tod_values['Unknown']}", 1)
                 pdf.ln()
             
-            # Add financial calculations
-            pdf.ln(5)
+            # Add financial calculations on a dedicated page
+            pdf.add_page()
             pdf.set_font('Arial', 'B', 14)  # Standardized heading font size
             pdf.cell(0, 10, 'Financial Calculations:', ln=True)
             pdf.set_font('Arial', '', 10)  # Consistent with table data font size
@@ -1811,40 +1796,12 @@ def index():
             cross_subsidy_surcharge = iex_excess_rounded * 1.92
             pdf.cell(0, 8, f"8. Cross Subsidy Surcharge (Deduction): IEX Excess ({iex_excess_rounded} kWh) x Rs.1.92 = Rs.{cross_subsidy_surcharge:.2f}", ln=True)
             
-            # Enhanced wheeling charges calculation for multiple sources (daywise)
-            wheeling_charges = 0
-            wheeling_breakdown = []
-            
-            # Get individual source excesses for daywise calculations
-            iex_excess_daywise = round_kwh_financial(merged['IEX_Excess'].sum())
-            cpp_excess_daywise = round_kwh_financial(merged['CPP_Excess'].sum()) if enable_cpp else 0
-            
-            # Calculate wheeling charges for IEX source (if enabled and has excess)
-            if enable_iex and iex_excess_daywise > 0:
-                iex_loss_percentage = t_and_d_loss
-                iex_x_value = (iex_excess_daywise * iex_loss_percentage) / (100 - iex_loss_percentage) if iex_loss_percentage < 100 else 0
-                iex_y_value = (iex_excess_daywise * iex_loss_percentage / iex_x_value) + iex_excess_daywise if iex_x_value != 0 else iex_excess_daywise
-                iex_wheeling = iex_y_value * 1.04
-                wheeling_charges += iex_wheeling
-                wheeling_breakdown.append(('IEX', iex_excess_daywise, iex_loss_percentage, iex_x_value, iex_y_value, iex_wheeling))
-            
-            # Calculate wheeling charges for CPP source (if enabled and has excess)
-            if enable_cpp and cpp_excess_daywise > 0:
-                cpp_loss_percentage = cpp_t_and_d_loss
-                cpp_x_value = (cpp_excess_daywise * cpp_loss_percentage) / (100 - cpp_loss_percentage) if cpp_loss_percentage < 100 else 0
-                cpp_y_value = (cpp_excess_daywise * cpp_loss_percentage / cpp_x_value) + cpp_excess_daywise if cpp_x_value != 0 else cpp_excess_daywise
-                cpp_wheeling = cpp_y_value * 1.04
-                wheeling_charges += cpp_wheeling
-                wheeling_breakdown.append(('CPP', cpp_excess_daywise, cpp_loss_percentage, cpp_x_value, cpp_y_value, cpp_wheeling))
+            wheeling_reference_kwh, wheeling_charges = compute_wheeling_components(
+                total_excess_rounded_daywise,
+                t_and_d_loss,
+            )
 
-            # Display wheeling charges calculation breakdown (simplified for daywise)
-            pdf.cell(0, 8, f"9. Wheeling Charges Calculation:", ln=True)
-            for i, (source, excess, loss_pct, x_val, y_val, wheeling) in enumerate(wheeling_breakdown):
-                pdf.cell(0, 8, f"9{chr(97+i)}. {source}: [{excess} x {loss_pct:.2f}% / (100-{loss_pct:.2f}%)] x 1.04 = Rs.{wheeling:.2f}", ln=True)
-            
-            if len(wheeling_breakdown) > 1:
-                total_wheeling_components = " + ".join([f"Rs.{w[5]:.2f}" for w in wheeling_breakdown])
-                pdf.cell(0, 8, f"9z. Total Wheeling Charges: {total_wheeling_components} = Rs.{wheeling_charges:.2f}", ln=True)
+            pdf.cell(0, 8, f"9. Wheeling Charges: Adj. Loss Component ({wheeling_reference_kwh:.2f} kWh) x Rs.{WHEELING_RATE_PER_KWH:.2f} = Rs.{wheeling_charges:.2f}", ln=True)
 
             # Calculate final amount to be collected with detailed breakdown
             final_amount = subtotal_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges)
