@@ -5,6 +5,8 @@ import os
 import math
 import json
 import calendar
+import hashlib
+import zipfile
 from fpdf import FPDF
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -323,6 +325,7 @@ def process_energy_data(generated_files, cpp_files, consumed_files,
                        auto_detect_month, month, year, date_filter):
     """Process energy data files and return calculation results"""
     try:
+        uploaded_artifacts = []
         # Ensure file lists are not None
         if not enable_iex:
             generated_files = []
@@ -333,14 +336,16 @@ def process_energy_data(generated_files, cpp_files, consumed_files,
         gen_df = None
         if generated_files and enable_iex and len(generated_files) > 0:
             gen_dfs = []
-            for gen_file in generated_files:
-                temp_df = pd.read_excel(gen_file, header=0)
+            for idx, gen_file in enumerate(generated_files, start=1):
+                artifact = capture_uploaded_artifact(gen_file, 'iex', idx)
+                temp_df = pd.read_excel(io.BytesIO(artifact['bytes']), header=0)
                 if temp_df.shape[1] < 3:
                     return {'success': False, 'error': f"Generated energy Excel file '{gen_file.name}' must have at least 3 columns: Date, Time, and Energy in MW."}
-                
+
                 # Add filename to help with debugging
-                temp_df['Source_File'] = gen_file.name
+                temp_df['Source_File'] = artifact['original_name']
                 gen_dfs.append(temp_df)
+                uploaded_artifacts.append(artifact)
             
             # Combine all generated energy dataframes
             if gen_dfs:
@@ -365,15 +370,17 @@ def process_energy_data(generated_files, cpp_files, consumed_files,
         cpp_df = None
         if cpp_files and enable_cpp and len(cpp_files) > 0:
             cpp_dfs = []
-            for cpp_file in cpp_files:
-                temp_df = pd.read_excel(cpp_file, header=0)
+            for idx, cpp_file in enumerate(cpp_files, start=1):
+                artifact = capture_uploaded_artifact(cpp_file, 'cpp', idx)
+                temp_df = pd.read_excel(io.BytesIO(artifact['bytes']), header=0)
                 if temp_df.shape[1] < 3:
                     return {'success': False, 'error': f"C.P.P energy Excel file '{cpp_file.name}' must have at least 3 columns: Date, Time, and Energy in MW."}
                 
                 # Add filename to help with debugging
-                temp_df['Source_File'] = cpp_file.name
+                temp_df['Source_File'] = artifact['original_name']
                 temp_df['Source_Type'] = 'C.P.P'
                 cpp_dfs.append(temp_df)
+                uploaded_artifacts.append(artifact)
             
             # Process C.P.P data if files were uploaded
             if cpp_dfs:
@@ -443,14 +450,16 @@ def process_energy_data(generated_files, cpp_files, consumed_files,
 
         # Process multiple consumed energy Excel files
         cons_dfs = []
-        for cons_file in consumed_files:
-            temp_df = pd.read_excel(cons_file, header=0)
+        for idx, cons_file in enumerate(consumed_files, start=1):
+            artifact = capture_uploaded_artifact(cons_file, 'consumption', idx)
+            temp_df = pd.read_excel(io.BytesIO(artifact['bytes']), header=0)
             if temp_df.shape[1] < 3:
                 return {'success': False, 'error': f"Consumed energy Excel file '{cons_file.name}' must have at least 3 columns: Date, Time, and Energy in kWh."}
             
             # Add filename to help with debugging
-            temp_df['Source_File'] = cons_file.name
+            temp_df['Source_File'] = artifact['original_name']
             cons_dfs.append(temp_df)
+            uploaded_artifacts.append(artifact)
         
         # Combine all consumed energy dataframes
         if not cons_dfs:
@@ -805,21 +814,23 @@ def process_energy_data(generated_files, cpp_files, consumed_files,
             'wheeling_adjusted_kwh': wheeling_adjusted_kwh,
             'final_amount': final_amount,
             'final_amount_rounded': final_amount_rounded,
-            'message': "Data processing completed successfully!"
+            'message': "Data processing completed successfully!",
+            'uploaded_artifacts': uploaded_artifacts,
         }}
         
     except Exception as e:
         return {'success': False, 'error': str(e)}
 
-def generate_custom_filename(base_name, consumer_number, consumer_name, month=None, year=None):
-    """Generate custom filename based on service number and name"""
+def generate_custom_filename(base_name, consumer_number, consumer_name, month=None, year=None, extension=".pdf"):
+    """Generate custom filename with optional extension and suffix logic."""
+    extension = extension if str(extension).startswith('.') else f".{extension}"
     # Get last 3 digits of service number
     last_3_digits = str(consumer_number)[-3:] if len(str(consumer_number)) >= 3 else str(consumer_number)
-    
+
     # Clean consumer name for filename (remove special characters)
-    clean_name = "".join(c for c in consumer_name if c.isalnum() or c in (' ', '-', '_')).strip()
-    clean_name = clean_name.replace(' ', '_')
-    
+    clean_name = "".join(c for c in str(consumer_name) if c.isalnum() or c in (' ', '-', '_')).strip()
+    clean_name = clean_name.replace(' ', '_') or "consumer"
+
     # Format month and year for filename (short date format)
     date_suffix = ""
     if month and year:
@@ -828,23 +839,65 @@ def generate_custom_filename(base_name, consumer_number, consumer_name, month=No
             year_num = int(float(year))
             # Format as MM_YY (e.g., 07_25 for July 2025)
             date_suffix = f"_{month_num:02d}_{year_num % 100:02d}"
-        except:
+        except Exception:
             date_suffix = ""  # If conversion fails, skip date suffix
-    
-    # Generate filename: last3digits_servicename_MM_YY.pdf
+
     base_filename = f"{last_3_digits}_{clean_name}{date_suffix}"
-    
-    # Add base name prefix for different PDF types
-    if 'excess_only' in base_name:
-        filename = f"{base_filename}_excess_only.pdf"
-    elif 'all_slots' in base_name:
-        filename = f"{base_filename}_all_slots.pdf"
-    elif 'daywise' in base_name:
-        filename = f"{base_filename}_daywise.pdf"
-    else:
-        filename = f"{base_filename}.pdf"
-    
-    return filename
+
+    suffix = ""
+    name_hint = (base_name or "").lower()
+    if 'excess_only' in name_hint:
+        suffix = "_excess_only"
+    elif 'all_slots' in name_hint:
+        suffix = "_all_slots"
+    elif 'daywise' in name_hint:
+        suffix = "_daywise"
+    elif name_hint:
+        safe_suffix = "".join(c for c in name_hint if c.isalnum() or c in ('_', '-')).strip('_')
+        if safe_suffix:
+            suffix = f"_{safe_suffix}"
+
+    return f"{base_filename}{suffix}{extension}"
+
+
+def append_hash_suffix(filename, hash_hex, label="sha256"):
+    """Append a short tamper-evident hash tag to a filename."""
+    if not hash_hex:
+        return filename
+    tag = hash_hex[:12]
+    if not tag:
+        return filename
+    path = Path(filename)
+    stem = path.stem or filename
+    suffix = path.suffix
+    return f"{stem}_{label}_{tag}{suffix}"
+
+
+def capture_uploaded_artifact(uploaded_file, category, index):
+    """Capture bytes and hash metadata for an uploaded Excel file."""
+    file_bytes = uploaded_file.getvalue()
+    uploaded_file.seek(0)
+    sha256_hash = hashlib.sha256(file_bytes).hexdigest()
+    extension = Path(uploaded_file.name).suffix or ".xlsx"
+    safe_category = "".join(c for c in str(category) if c.isalnum() or c in ('_', '-')).strip('_') or "source"
+    base_name = f"{safe_category}_upload_{index}"
+    return {
+        'category': safe_category,
+        'sequence': index,
+        'original_name': uploaded_file.name,
+        'bytes': file_bytes,
+        'hash': sha256_hash,
+        'extension': extension,
+        'base_name': base_name,
+    }
+
+
+def build_consumer_slug(consumer_number, consumer_name):
+    """Create a reusable slug for bundle filenames."""
+    last_3_digits = str(consumer_number)[-3:] if len(str(consumer_number)) >= 3 else str(consumer_number)
+    clean_name = "".join(c for c in str(consumer_name) if c.isalnum() or c in (' ', '-', '_')).strip()
+    clean_name = clean_name.replace(' ', '_') or "consumer"
+    return f"{last_3_digits}_{clean_name}"
 
 def generate_detailed_pdf(data, pdf_data, pdf_type):
     """Generate detailed PDF with complete table data and calculations"""
@@ -1474,12 +1527,20 @@ def generate_daywise_pdf(data, pdf_data):
         pdf.cell(0, 10, 'Day-wise Summary Table', ln=True, align='C')
         pdf.ln(10)
         
-        # Table headers
+        # Table headers sized to respect left/right margins
+        usable_width = pdf.w - pdf.l_margin - pdf.r_margin
+        date_col_width = usable_width * 0.22
+        other_col_width = (usable_width - date_col_width) / 3
+        table_columns = [
+            ('Date', date_col_width),
+            ('Total Gen. After Loss', other_col_width),
+            ('Total Consumed', other_col_width),
+            ('Total Excess', other_col_width),
+        ]
+
         pdf.set_font('Arial', 'B', 9)
-        pdf.cell(40, 10, 'Date', 1)
-        pdf.cell(50, 10, 'Total Gen. After Loss', 1)
-        pdf.cell(50, 10, 'Total Consumed', 1)
-        pdf.cell(50, 10, 'Total Excess', 1)
+        for header, width in table_columns:
+            pdf.cell(width, 10, header, 1)
         pdf.ln()
         
         # Calculate day-wise data
@@ -1500,14 +1561,14 @@ def generate_daywise_pdf(data, pdf_data):
             daywise['Total_After_Loss'] = daywise['After_Loss']
         
         pdf.set_font('Arial', '', 8)
-        for idx, row in daywise.iterrows():
-            pdf.cell(40, 10, str(row['Slot_Date']), 1)
-            pdf.cell(50, 10, f"{row['Total_After_Loss']:.4f}", 1)
-            pdf.cell(50, 10, f"{row['Energy_kWh_cons']:.4f}", 1)
-            
+        for _, row in daywise.iterrows():
+            pdf.cell(date_col_width, 10, str(row['Slot_Date']), 1)
+            pdf.cell(other_col_width, 10, f"{row['Total_After_Loss']:.4f}", 1)
+            pdf.cell(other_col_width, 10, f"{row['Energy_kWh_cons']:.4f}", 1)
+
             # Round excess values for display
             total_excess_rounded = int(row['Total_Excess'] + 0.5) if row['Total_Excess'] >= 0 else int(row['Total_Excess'] - 0.5)
-            pdf.cell(50, 10, f"{total_excess_rounded}", 1)
+            pdf.cell(other_col_width, 10, f"{total_excess_rounded}", 1)
             pdf.ln()
         
         # Add same calculation summary as detailed PDF
@@ -1660,15 +1721,22 @@ def generate_daywise_pdf(data, pdf_data):
             final_amount = total_with_etax - (etax_on_iex + cross_subsidy_surcharge + wheeling_charges + additional_surcharge)
             final_amount_rounded = math.ceil(final_amount)
 
-        pdf.cell(0, 8, f"1. Base Rate: Total Excess Energy ({total_excess_financial_rounded} kWh) x Rs.{base_rate:.4f} = Rs.{base_amount:.2f}", ln=True)
-        pdf.cell(0, 8, f"2. C1+C2 Additional: Excess in C1+C2 ({c1_c2_excess} kWh) x Rs.{c1_c2_rate:.4f} = Rs.{c1_c2_additional:.2f}", ln=True)
-        pdf.cell(0, 8, f"3. C5 Additional: Excess in C5 ({c5_excess} kWh) x Rs.{c5_rate:.4f} = Rs.{c5_additional:.2f}", ln=True)
-        pdf.cell(0, 8, f"4. Partial Total: Rs.{total_amount:.2f}", ln=True)
-        pdf.cell(0, 8, f"5. E-Tax (5%): Rs.{etax:.2f}", ln=True)
-        pdf.cell(0, 8, f"6. Subtotal with E-Tax: Rs.{total_with_etax:.2f}", ln=True)
-        pdf.cell(0, 8, f"7. Less: E-Tax on IEX: Rs.{etax_on_iex:.2f}", ln=True)
-        pdf.cell(0, 8, f"8. Less: Cross Subsidy Surcharge: {iex_excess_financial} kWh x Rs.{cross_subsidy_rate:.4f} = Rs.{cross_subsidy_surcharge:.2f}", ln=True)
-        pdf.cell(0, 8, f"8a. Less: Additional Surcharge (IEX): Rs.{additional_surcharge:.2f}", ln=True)
+        line_gap = 1.8
+
+        def add_spaced_line(text, bold=False):
+            pdf.set_font('Arial', 'B' if bold else '', 10)
+            pdf.cell(0, 8, text, ln=True)
+            pdf.ln(line_gap)
+
+        add_spaced_line(f"1. Base Rate: Total Excess Energy ({total_excess_financial_rounded} kWh) x Rs.{base_rate:.4f} = Rs.{base_amount:.2f}")
+        add_spaced_line(f"2. C1+C2 Additional: Excess in C1+C2 ({c1_c2_excess} kWh) x Rs.{c1_c2_rate:.4f} = Rs.{c1_c2_additional:.2f}")
+        add_spaced_line(f"3. C5 Additional: Excess in C5 ({c5_excess} kWh) x Rs.{c5_rate:.4f} = Rs.{c5_additional:.2f}")
+        add_spaced_line(f"4. Partial Total: Rs.{total_amount:.2f}")
+        add_spaced_line(f"5. E-Tax (5%): Rs.{etax:.2f}")
+        add_spaced_line(f"6. Subtotal with E-Tax: Rs.{total_with_etax:.2f}")
+        add_spaced_line(f"7. Less: E-Tax on IEX: Rs.{etax_on_iex:.2f}")
+        add_spaced_line(f"8. Less: Cross Subsidy Surcharge: {iex_excess_financial} kWh x Rs.{cross_subsidy_rate:.4f} = Rs.{cross_subsidy_surcharge:.2f}")
+        add_spaced_line(f"8a. Less: Additional Surcharge (IEX): Rs.{additional_surcharge:.2f}")
         if additional_surcharge_breakdown:
             for entry in additional_surcharge_breakdown:
                 if isinstance(entry, dict):
@@ -1678,22 +1746,29 @@ def generate_daywise_pdf(data, pdf_data):
                     amount_value = entry.get('amount', 0.0)
                     note_value = entry.get('note', '')
                     pdf.cell(0, 6, f"    - {period_text}: {kwh_value} kWh x Rs.{rate_value:.2f} per kWh = Rs.{amount_value:.4f} ({note_value})", ln=True)
+                    pdf.ln(0.8)
                 else:
                     try:
                         s_start, s_end, s_excess, s_paise, s_comp, s_note = entry
                         pdf.cell(0, 6, f"    - {s_start} to {s_end}: {s_excess} kWh x Rs.{s_paise} per kWh = Rs.{s_comp:.4f} ({s_note})", ln=True)
+                        pdf.ln(0.8)
                     except Exception:
                         continue
 
-        pdf.cell(0, 8, f"9. Wheeling Reference: Total Excess ({total_excess_financial_rounded} kWh) + Rounded Loss ({wheeling_reference_kwh:.2f} kWh) = {wheeling_combined_kwh:.2f} kWh", ln=True)
-        pdf.cell(0, 8, f"9a. Less 2.34%: {wheeling_combined_kwh:.2f} kWh × 2.34% = {wheeling_reduction_kwh:.2f} kWh", ln=True)
-        pdf.cell(0, 8, f"9b. Wheeling Charges: ({wheeling_combined_kwh:.2f} - {wheeling_reduction_kwh:.2f}) kWh × Rs.{wheeling_rate:.4f} = Rs.{wheeling_charges:.2f}", ln=True)
+        add_spaced_line(
+            f"9. Wheeling Reference: Total Excess ({total_excess_financial_rounded} kWh) + Rounded Loss ({wheeling_reference_kwh:.2f} kWh) = {wheeling_combined_kwh:.2f} kWh"
+        )
+        add_spaced_line(
+            f"9a. Less 2.34%: {wheeling_combined_kwh:.2f} kWh × 2.34% = {wheeling_reduction_kwh:.2f} kWh"
+        )
+        add_spaced_line(
+            f"9b. Wheeling Charges: ({wheeling_combined_kwh:.2f} - {wheeling_reduction_kwh:.2f}) kWh × Rs.{wheeling_rate:.4f} = Rs.{wheeling_charges:.2f}"
+        )
 
         deductions_total = etax_on_iex + cross_subsidy_surcharge + wheeling_charges + additional_surcharge
 
-        pdf.set_font('Arial', 'B', 10)
-        pdf.cell(0, 8, f"10. Final Amount: Rs.{total_with_etax:.2f} - Rs.{deductions_total:.2f} = Rs.{final_amount:.2f}", ln=True)
-        pdf.cell(0, 8, f"11. Final Amount (Rounded Up): Rs.{final_amount_rounded}", ln=True)
+        add_spaced_line(f"10. Final Amount: Rs.{total_with_etax:.2f} - Rs.{deductions_total:.2f} = Rs.{final_amount:.2f}", bold=True)
+        add_spaced_line(f"11. Final Amount (Rounded Up): Rs.{final_amount_rounded}", bold=True)
 
         # Generate PDF bytes
         pdf_output = io.BytesIO()
@@ -2260,40 +2335,76 @@ if st.session_state.processed_data:
                 filename = generate_custom_filename("daywise", data['consumer_number'], data['consumer_name'], data.get('month'), data.get('year'))
                 pdfs_generated.append((filename, pdf_bytes))
     
-    # Display download buttons for generated PDFs
+    # Display download option (complete package only)
     if pdfs_generated:
         st.success(f"✅ Successfully generated {len(pdfs_generated)} PDF report(s)!")
-        
-        if len(pdfs_generated) == 1:
-            # Single PDF download
-            filename, pdf_bytes = pdfs_generated[0]
-            st.download_button(
-                label=f"📥 Download {filename}",
-                data=pdf_bytes,
-                file_name=filename,
-                mime="application/pdf",
-                type="primary"
-            )
-        else:
-            # Multiple PDFs - create a ZIP file
-            import zipfile
-            zip_buffer = io.BytesIO()
-            last_3_digits = str(data['consumer_number'])[-3:] if len(str(data['consumer_number'])) >= 3 else str(data['consumer_number'])
-            clean_name = "".join(c for c in data['consumer_name'] if c.isalnum() or c in (' ', '-', '_')).strip().replace(' ', '_')
-            zip_filename = f"{last_3_digits}_{clean_name}_energy_adjustment_reports.zip"
-            
-            with zipfile.ZipFile(zip_buffer, 'w') as zf:
+
+        excel_artifacts_raw = data.get('uploaded_artifacts') or []
+        excel_downloads = []
+        if excel_artifacts_raw:
+            for idx, artifact in enumerate(excel_artifacts_raw, start=1):
+                extension = artifact.get('extension') or '.xlsx'
+                generated_name = generate_custom_filename(
+                    artifact.get('base_name', f"source_{idx}"),
+                    data['consumer_number'],
+                    data['consumer_name'],
+                    data.get('month'),
+                    data.get('year'),
+                    extension=extension,
+                )
+                hashed_name = append_hash_suffix(generated_name, artifact.get('hash'))
+                excel_downloads.append({
+                    'final_name': hashed_name,
+                    'bytes': artifact['bytes'],
+                    'hash_full': artifact.get('hash', ''),
+                    'hash_short': (artifact.get('hash', '') or '')[:12],
+                    'original_name': artifact.get('original_name', 'uploaded_file.xlsx'),
+                })
+
+        if excel_downloads:
+            st.subheader("🛡️ Source Excel Integrity Pack")
+            integrity_rows = [
+                {
+                    "Renamed File": entry['final_name'],
+                    "Original Upload": entry['original_name'],
+                    "SHA256 (first 12 chars)": entry['hash_short'] or 'N/A',
+                }
+                for entry in excel_downloads
+            ]
+            if integrity_rows:
+                integrity_df = pd.DataFrame(integrity_rows)
+                st.dataframe(integrity_df, use_container_width=True)
+
+        slug = build_consumer_slug(data['consumer_number'], data['consumer_name'])
+        bundle_buffer = io.BytesIO()
+        manifest_lines = [
+            "Complete Package Manifest",
+            "-------------------------",
+        ]
+        with zipfile.ZipFile(bundle_buffer, 'w') as bundle_zip:
+            if pdfs_generated:
+                manifest_lines.append("Reports Included:")
                 for fname, pdf_bytes in pdfs_generated:
-                    zf.writestr(fname, pdf_bytes)
-            zip_buffer.seek(0)
-            
-            st.download_button(
-                label=f"� Download All Reports (ZIP)",
-                data=zip_buffer.getvalue(),
-                file_name=zip_filename,
-                mime="application/zip",
-                type="primary"
-            )
+                    bundle_zip.writestr(f"reports/{fname}", pdf_bytes)
+                    manifest_lines.append(f" - {fname}")
+            if excel_downloads:
+                manifest_lines.append("")
+                manifest_lines.append("Source Excels:")
+                for entry in excel_downloads:
+                    bundle_zip.writestr(f"source_excels/{entry['final_name']}", entry['bytes'])
+                    manifest_lines.append(
+                        f" - {entry['final_name']} | sha256={entry['hash_full']} | original={entry['original_name']}"
+                    )
+            bundle_zip.writestr("MANIFEST.txt", "\n".join(manifest_lines))
+        bundle_buffer.seek(0)
+        bundle_zip_name = f"{slug}_reports_and_sources.zip"
+        st.download_button(
+            label="📦 Download Complete Package (ZIP)",
+            data=bundle_buffer.getvalue(),
+            file_name=bundle_zip_name,
+            mime="application/zip",
+            type="primary"
+        )
     else:
         st.error("❌ No PDF reports were generated. Please check your selections and try again.")
 
