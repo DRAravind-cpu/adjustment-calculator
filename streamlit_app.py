@@ -306,6 +306,520 @@ st.set_page_config(
     layout="wide"
 )
 
+
+def render_auto_update_sidebar() -> None:
+    """Render the auto-update UI in the Streamlit sidebar (when available)."""
+    if not UPDATER_AVAILABLE:
+        return
+
+    with st.sidebar:
+        st.header("🔄 Auto-Update System")
+
+        # Get current version
+        version_file = Path(__file__).parent / "version.json"
+        current_version = "1.0.0"
+        if version_file.exists():
+            try:
+                with open(version_file, 'r') as f:
+                    version_data = json.load(f)
+                    current_version = version_data.get("version", "1.0.0")
+            except Exception:
+                pass
+
+        st.info(f"**Current Version:** {current_version}")
+
+        # Initialize updater
+        if 'updater' not in st.session_state:
+            st.session_state.updater = initialize_updater(current_version)
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if st.button("🔍 Check Updates", help="Check for available updates"):
+                with st.spinner("Checking for updates..."):
+                    update_info = st.session_state.updater.check_for_updates(show_no_updates=False)
+                    if update_info:
+                        st.success(f"Update available: v{update_info['version']}")
+                        st.info(f"**What's New:**\n{update_info['description'][:200]}...")
+
+                        if st.button("📥 Download Update", key="download_update"):
+                            with st.spinner("Downloading and applying update..."):
+                                try:
+                                    update_file = st.session_state.updater.download_update(update_info)
+                                    if update_file:
+                                        if st.session_state.updater.apply_update(update_file, update_info):
+                                            st.success("✅ Update applied successfully! Please restart the application.")
+                                            st.balloons()
+                                        else:
+                                            st.error("❌ Failed to apply update.")
+                                    else:
+                                        st.error("❌ Failed to download update.")
+                                except Exception as e:
+                                    st.error(f"❌ Update failed: {e}")
+                    else:
+                        st.success("✅ You have the latest version!")
+
+        with col2:
+            if st.button("⚙️ Settings", help="Update settings"):
+                show_update_settings(st.session_state.updater)
+
+        # Auto-update status
+        if st.session_state.updater.config.get("auto_check", True):
+            st.success("🟢 Auto-updates enabled")
+        else:
+            st.warning("🟡 Auto-updates disabled")
+
+        # Last check info
+        last_check = st.session_state.updater.config.get("last_check")
+        if last_check:
+            try:
+                last_check_time = datetime.fromisoformat(last_check)
+                st.caption(f"Last checked: {last_check_time.strftime('%d/%m/%Y %H:%M')}")
+            except Exception:
+                pass
+
+
+def render_footer(app_label: str) -> None:
+    st.markdown("---")
+    st.markdown(app_label)
+    if UPDATER_AVAILABLE:
+        st.markdown("🔄 Auto-update system enabled")
+
+
+def render_bpsc_calculator() -> None:
+    def _sanitize_excel_text(value: str) -> str:
+        """Prevent Excel formula injection for exported strings."""
+        text = (value or "")
+        if not text:
+            return ""
+        if text[0] in ('=', '+', '-', '@'):
+            return "'" + text
+        return text
+
+    def _parse_optional_day(day_text: str | None) -> int | None:
+        if day_text is None:
+            return None
+        day_text = str(day_text).strip()
+        if not day_text:
+            return None
+        try:
+            day_val = int(float(day_text))
+        except Exception:
+            return None
+        if day_val < 1 or day_val > 31:
+            return None
+        return day_val
+
+    def _build_date_from_month_year_optional_day(month_int: int, year_int: int, day_opt: int | None) -> datetime:
+        last_day = calendar.monthrange(year_int, month_int)[1]
+        day_int = day_opt if day_opt is not None else last_day
+        if day_int > last_day:
+            day_int = last_day
+        return datetime(year_int, month_int, day_int)
+
+    def _render_month_year_day(prefix: str, label: str) -> tuple[datetime, str]:
+        now = datetime.today()
+        months = list(range(1, 13))
+        month_labels = [calendar.month_name[m] for m in months]
+
+        colm, coly, cold = st.columns([2, 2, 1])
+        with colm:
+            month_idx = st.selectbox(
+                f"{label} Month",
+                options=list(range(len(months))),
+                format_func=lambda i: month_labels[i],
+                index=max(0, now.month - 1),
+                key=f"{prefix}_month_idx",
+            )
+            month_int = months[month_idx]
+        with coly:
+            year_int = st.selectbox(
+                f"{label} Year",
+                options=list(range(2000, 2101)),
+                index=list(range(2000, 2101)).index(now.year),
+                key=f"{prefix}_year",
+            )
+        with cold:
+            day_text = st.text_input(
+                f"{label} Day (optional)",
+                value="",
+                key=f"{prefix}_day",
+                help="Leave blank to default to the last day of the selected month.",
+            )
+
+        day_opt = _parse_optional_day(day_text)
+        dt = _build_date_from_month_year_optional_day(month_int, year_int, day_opt)
+        display = dt.strftime('%d/%m/%Y')
+        return dt, display
+
+    def _generate_bpsc_pdf(
+        consumer_name: str,
+        service_number: str,
+        author_name: str,
+        rows: list[dict[str, Any]],
+        totals: dict[str, float],
+    ) -> bytes:
+        pdf = AuthorPDF(author_name=author_name)
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+
+        pdf.set_font('Arial', 'B', 14)
+        pdf.cell(0, 10, 'BPSC Calculator Report', ln=True, align='C')
+        pdf.ln(2)
+
+        pdf.set_font('Arial', '', 11)
+        pdf.cell(0, 7, f"Consumer Name: {consumer_name}", ln=True)
+        pdf.cell(0, 7, f"Service Number: {service_number}", ln=True)
+        pdf.ln(4)
+
+        headers = ['S.No', 'Amount', 'Due Date', 'Cutoff Date', 'Days', 'BPSC Amount', 'Total']
+        col_widths = [12, 25, 28, 28, 14, 30, 30]
+
+        pdf.set_font('Arial', 'B', 10)
+        for h, w in zip(headers, col_widths):
+            pdf.cell(w, 8, h, border=1, align='C')
+        pdf.ln()
+
+        pdf.set_font('Arial', '', 10)
+        for r in rows:
+            pdf.cell(col_widths[0], 8, str(r['sno']), border=1, align='C')
+            pdf.cell(col_widths[1], 8, f"{r['amount']:.2f}", border=1, align='R')
+            pdf.cell(col_widths[2], 8, r['due_date'], border=1, align='C')
+            pdf.cell(col_widths[3], 8, r['cutoff_date'], border=1, align='C')
+            pdf.cell(col_widths[4], 8, str(r['days']), border=1, align='C')
+            pdf.cell(col_widths[5], 8, f"{r['bpsc_amount']:.2f}", border=1, align='R')
+            pdf.cell(col_widths[6], 8, f"{r['row_total']:.2f}", border=1, align='R')
+            pdf.ln()
+
+        pdf.ln(4)
+        pdf.set_font('Arial', 'B', 11)
+        pdf.cell(0, 7, f"Total Base Amount: {totals['total_base']:.2f}", ln=True)
+        pdf.cell(0, 7, f"Total BPSC: {totals['total_bpsc']:.2f}", ln=True)
+        pdf.cell(0, 7, f"Final Amount: {totals['final_amount']:.2f}", ln=True)
+
+        return pdf.output(dest='S').encode('latin-1')
+
+    def _generate_bpsc_excel(
+        consumer_name: str,
+        service_number: str,
+        author_name: str,
+        rows: list[dict[str, Any]],
+        totals: dict[str, float],
+    ) -> bytes:
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, Border, Side
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "BPSC Report"
+
+        bold = Font(bold=True)
+        title_font = Font(bold=True, size=14)
+        thin = Side(style='thin')
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        ws.merge_cells('A1:G1')
+        ws['A1'] = 'BPSC Calculator Report'
+        ws['A1'].font = title_font
+        ws['A1'].alignment = Alignment(horizontal='center')
+
+        ws['A3'] = 'Author:'
+        ws['B3'] = _sanitize_excel_text(author_name)
+        ws['A4'] = 'Consumer Name:'
+        ws['B4'] = _sanitize_excel_text(consumer_name)
+        ws['A5'] = 'Service Number:'
+        ws['B5'] = _sanitize_excel_text(service_number)
+        for cell in ['A3', 'A4', 'A5']:
+            ws[cell].font = bold
+
+        start_row = 7
+        headers = ['S.No', 'Amount', 'Due Date', 'Cutoff Date', 'Difference (Days)', 'BPSC Amount', 'Base Amount + BPSC']
+        for col_idx, header in enumerate(headers, start=1):
+            cell = ws.cell(row=start_row, column=col_idx, value=header)
+            cell.font = bold
+            cell.alignment = Alignment(horizontal='center')
+            cell.border = border
+
+        for i, r in enumerate(rows, start=1):
+            row_num = start_row + i
+            values = [
+                r['sno'],
+                round(float(r['amount']), 2),
+                _sanitize_excel_text(r['due_date']),
+                _sanitize_excel_text(r['cutoff_date']),
+                int(r['days']),
+                round(float(r['bpsc_amount']), 2),
+                round(float(r['row_total']), 2),
+            ]
+            for col_idx, val in enumerate(values, start=1):
+                cell = ws.cell(row=row_num, column=col_idx, value=val)
+                cell.border = border
+                if col_idx in (1, 5):
+                    cell.alignment = Alignment(horizontal='center')
+                elif col_idx in (3, 4):
+                    cell.alignment = Alignment(horizontal='center')
+                else:
+                    cell.alignment = Alignment(horizontal='right')
+
+        totals_row = start_row + len(rows) + 2
+        ws['A' + str(totals_row)] = 'Total Base Amount (₹)'
+        ws['B' + str(totals_row)] = float(totals['total_base'])
+        ws['A' + str(totals_row + 1)] = 'Total BPSC (₹)'
+        ws['B' + str(totals_row + 1)] = float(totals['total_bpsc'])
+        ws['A' + str(totals_row + 2)] = 'Final Amount (₹)'
+        ws['B' + str(totals_row + 2)] = float(totals['final_amount'])
+        for r in range(totals_row, totals_row + 3):
+            ws['A' + str(r)].font = bold
+
+        # Basic column widths
+        widths = [6, 14, 14, 14, 16, 14, 18]
+        for i, w in enumerate(widths, start=1):
+            ws.column_dimensions[chr(64 + i)].width = w
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return output.getvalue()
+
+    # Header
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.title("BPSC Calculator")
+    with col2:
+        st.markdown(f"**Author: {PDF_AUTHOR_NAME}**")
+
+    # Session state storage for entries
+    if 'bpsc_entries' not in st.session_state:
+        st.session_state.bpsc_entries = []
+    if 'bpsc_processed' not in st.session_state:
+        st.session_state.bpsc_processed = False
+    # Do not directly mutate session_state for widget keys after instantiation.
+    # We rely on form clear_on_submit=True to reset entry inputs after adding.
+
+    def _parse_amount_text(amount_text: str) -> float | None:
+        raw = (amount_text or "").strip()
+        if not raw:
+            return None
+        # allow copy/paste with commas (e.g., 1,23,456.78)
+        cleaned = raw.replace(",", "").replace(" ", "")
+        try:
+            val = float(cleaned)
+        except Exception:
+            return None
+        if val < 0:
+            return None
+        return val
+
+    st.subheader("Consumer Information")
+    c1, c2 = st.columns(2)
+    with c1:
+        consumer_name = st.text_input("Consumer Name", value=st.session_state.get('bpsc_consumer_name', ''))
+    with c2:
+        service_number = st.text_input("Service Number", value=st.session_state.get('bpsc_service_number', ''))
+
+    st.session_state.bpsc_consumer_name = consumer_name
+    st.session_state.bpsc_service_number = service_number
+
+    st.subheader("BPSC Settings")
+    s1, s2 = st.columns(2)
+    with s1:
+        use_fixed_bpsc = st.checkbox("Use fixed BPSC % for all entries", value=st.session_state.get('bpsc_use_fixed_pct', True))
+    with s2:
+        use_fixed_cutoff = st.checkbox("Use fixed cutoff date for all entries", value=st.session_state.get('bpsc_use_fixed_cutoff', True))
+
+    st.session_state.bpsc_use_fixed_pct = use_fixed_bpsc
+    st.session_state.bpsc_use_fixed_cutoff = use_fixed_cutoff
+
+    fixed_bpsc_pct = None
+    fixed_cutoff_dt = None
+    fixed_cutoff_display = None
+
+    if use_fixed_bpsc:
+        fixed_bpsc_pct = st.number_input(
+            "Fixed BPSC Percentage (%)",
+            min_value=0.0,
+            value=float(st.session_state.get('bpsc_fixed_pct', 0.0) or 0.0),
+            step=0.01,
+            format="%.4f",
+        )
+        st.session_state.bpsc_fixed_pct = fixed_bpsc_pct
+
+    if use_fixed_cutoff:
+        fixed_cutoff_dt, fixed_cutoff_display = _render_month_year_day("bpsc_fixed_cutoff", "Cutoff Date")
+
+    st.subheader("Add Entry")
+    with st.form("bpsc_add_entry_form", clear_on_submit=True):
+        amount_text = st.text_input(
+            "Amount (₹)",
+            key="bpsc_amount_text",
+            help="You can paste values like 123456 or 1,23,456.00",
+        )
+        st.markdown("**Bill Issued Date**")
+        issued_dt, issued_display = _render_month_year_day("bpsc_issued", "Bill Issued")
+        st.markdown("**Due Date**")
+        due_dt, due_display = _render_month_year_day("bpsc_due", "Due")
+
+        if not use_fixed_cutoff:
+            st.markdown("**Cutoff Date**")
+            cutoff_dt, cutoff_display = _render_month_year_day("bpsc_cutoff", "Cutoff")
+        else:
+            cutoff_dt, cutoff_display = fixed_cutoff_dt, fixed_cutoff_display
+
+        if not use_fixed_bpsc:
+            entry_bpsc_pct = st.number_input(
+                "BPSC Percentage (%)",
+                min_value=0.0,
+                value=0.0,
+                step=0.01,
+                format="%.4f",
+            )
+        else:
+            entry_bpsc_pct = float(fixed_bpsc_pct or 0.0)
+
+        add_clicked = st.form_submit_button("Add")
+        if add_clicked:
+            parsed_amount = _parse_amount_text(amount_text)
+            if not consumer_name.strip() or not service_number.strip():
+                st.error("Please enter Consumer Name and Service Number before adding entries.")
+            elif parsed_amount is None:
+                st.error("Please enter a valid Amount (non-negative number).")
+            elif cutoff_dt is None or due_dt is None:
+                st.error("Please provide valid Due Date and Cutoff Date.")
+            elif cutoff_dt < due_dt:
+                st.error("Cutoff Date must be on or after Due Date.")
+            else:
+                days = (cutoff_dt - due_dt).days + 1
+                bpsc_amount = (float(parsed_amount) * float(entry_bpsc_pct) / 100.0 / 30.0) * float(days)
+                row_total = float(parsed_amount) + float(bpsc_amount)
+                st.session_state.bpsc_entries.append(
+                    {
+                        "amount": float(parsed_amount),
+                        "bpsc_pct": float(entry_bpsc_pct),
+                        "issued_date": issued_display,
+                        "due_date": due_display,
+                        "cutoff_date": cutoff_display,
+                        "days": int(days),
+                        "bpsc_amount": float(bpsc_amount),
+                        "row_total": float(row_total),
+                    }
+                )
+                st.session_state.bpsc_processed = False
+                st.success("Entry added.")
+
+    actions_col1, actions_col2 = st.columns([1, 2])
+    with actions_col1:
+        if st.button("Clear All Entries"):
+            st.session_state.bpsc_entries = []
+            st.session_state.bpsc_processed = False
+            st.success("All entries cleared.")
+
+    process_disabled = len(st.session_state.bpsc_entries) == 0
+    if st.button("Process", type="primary", disabled=process_disabled):
+        st.session_state.bpsc_processed = True
+
+    if not st.session_state.bpsc_processed:
+        return
+
+    # Build output table
+    rows_for_table: list[dict[str, Any]] = []
+    for idx, entry in enumerate(st.session_state.bpsc_entries, start=1):
+        rows_for_table.append(
+            {
+                "sno": idx,
+                "amount": entry["amount"],
+                "due_date": entry["due_date"],
+                "cutoff_date": entry["cutoff_date"],
+                "days": entry["days"],
+                "bpsc_amount": entry["bpsc_amount"],
+                "row_total": entry["row_total"],
+                # Keep issued date for exports/details (not requested as a table column)
+                "issued_date": entry.get("issued_date", ""),
+                "bpsc_pct": entry.get("bpsc_pct", 0.0),
+            }
+        )
+
+    st.subheader("Result")
+    display_df = pd.DataFrame(
+        [
+            {
+                "S.No": r["sno"],
+                "Amount": round(r["amount"], 2),
+                "Due Date": r["due_date"],
+                "Cutoff Date": r["cutoff_date"],
+                "Difference (Days)": r["days"],
+                "BPSC Amount": round(r["bpsc_amount"], 2),
+                "Base Amount + BPSC": round(r["row_total"], 2),
+            }
+            for r in rows_for_table
+        ]
+    )
+    st.dataframe(display_df, use_container_width=True)
+
+    total_base = sum(r["amount"] for r in rows_for_table)
+    total_bpsc = sum(r["bpsc_amount"] for r in rows_for_table)
+    final_amount = total_base + total_bpsc
+
+    totals = {
+        "total_base": float(total_base),
+        "total_bpsc": float(total_bpsc),
+        "final_amount": float(final_amount),
+    }
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Total Base Amount (₹)", f"{total_base:,.2f}")
+    m2.metric("Total BPSC (₹)", f"{total_bpsc:,.2f}")
+    m3.metric("Final Amount (₹)", f"{final_amount:,.2f}")
+
+    # Downloads
+    pdf_bytes = _generate_bpsc_pdf(
+        consumer_name=consumer_name,
+        service_number=service_number,
+        author_name=PDF_AUTHOR_NAME,
+        rows=rows_for_table,
+        totals=totals,
+    )
+    excel_bytes = _generate_bpsc_excel(
+        consumer_name=consumer_name,
+        service_number=service_number,
+        author_name=PDF_AUTHOR_NAME,
+        rows=rows_for_table,
+        totals=totals,
+    )
+
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        st.download_button(
+            label="Download PDF",
+            data=pdf_bytes,
+            file_name=f"{service_number}_BPSC_Report.pdf" if service_number else "BPSC_Report.pdf",
+            mime="application/pdf",
+            type="primary",
+        )
+    with dl2:
+        st.download_button(
+            label="Download Excel",
+            data=excel_bytes,
+            file_name=f"{service_number}_BPSC_Report.xlsx" if service_number else "BPSC_Report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="secondary",
+        )
+
+
+# Sidebar navigation
+selected_app = st.sidebar.radio(
+    "Select Calculator",
+    options=["Energy Adjustment Calculator", "BPSC Calculator"],
+    index=0,
+)
+
+# If user chooses BPSC, render that page and stop before executing the
+# (large) Energy Adjustment UI below.
+if selected_app == "BPSC Calculator":
+    render_auto_update_sidebar()
+    render_bpsc_calculator()
+    render_footer("BPSC Calculator - Streamlit Version")
+    st.stop()
+
 # Title and author
 col1, col2 = st.columns([3, 1])
 with col1:
@@ -2412,78 +2926,5 @@ if st.session_state.processed_data:
 if st.session_state.error_message:
     st.error(st.session_state.error_message)
 
-# Auto-Update Sidebar
-if UPDATER_AVAILABLE:
-    with st.sidebar:
-        st.header("🔄 Auto-Update System")
-        
-        # Get current version
-        version_file = Path(__file__).parent / "version.json"
-        current_version = "1.0.0"
-        if version_file.exists():
-            try:
-                with open(version_file, 'r') as f:
-                    version_data = json.load(f)
-                    current_version = version_data.get("version", "1.0.0")
-            except:
-                pass
-        
-        st.info(f"**Current Version:** {current_version}")
-        
-        # Initialize updater
-        if 'updater' not in st.session_state:
-            st.session_state.updater = initialize_updater(current_version)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            if st.button("🔍 Check Updates", help="Check for available updates"):
-                with st.spinner("Checking for updates..."):
-                    update_info = st.session_state.updater.check_for_updates(show_no_updates=False)
-                    if update_info:
-                        st.success(f"Update available: v{update_info['version']}")
-                        st.info(f"**What's New:**\n{update_info['description'][:200]}...")
-                        
-                        if st.button("📥 Download Update", key="download_update"):
-                            with st.spinner("Downloading and applying update..."):
-                                try:
-                                    # Download update
-                                    update_file = st.session_state.updater.download_update(update_info)
-                                    if update_file:
-                                        # Apply update
-                                        if st.session_state.updater.apply_update(update_file, update_info):
-                                            st.success("✅ Update applied successfully! Please restart the application.")
-                                            st.balloons()
-                                        else:
-                                            st.error("❌ Failed to apply update.")
-                                    else:
-                                        st.error("❌ Failed to download update.")
-                                except Exception as e:
-                                    st.error(f"❌ Update failed: {e}")
-                    else:
-                        st.success("✅ You have the latest version!")
-        
-        with col2:
-            if st.button("⚙️ Settings", help="Update settings"):
-                show_update_settings(st.session_state.updater)
-        
-        # Auto-update status
-        if st.session_state.updater.config.get("auto_check", True):
-            st.success("🟢 Auto-updates enabled")
-        else:
-            st.warning("🟡 Auto-updates disabled")
-        
-        # Last check info
-        last_check = st.session_state.updater.config.get("last_check")
-        if last_check:
-            try:
-                last_check_time = datetime.fromisoformat(last_check)
-                st.caption(f"Last checked: {last_check_time.strftime('%d/%m/%Y %H:%M')}")
-            except:
-                pass
-
-# Footer
-st.markdown("---")
-st.markdown("Energy Adjustment Calculator - Streamlit Version")
-if UPDATER_AVAILABLE:
-    st.markdown("🔄 Auto-update system enabled")
+render_auto_update_sidebar()
+render_footer("Energy Adjustment Calculator - Streamlit Version")

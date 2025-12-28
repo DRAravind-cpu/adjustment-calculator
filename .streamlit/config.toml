@@ -1,8 +1,8 @@
 [server]
 maxUploadSize = 200
 headless = true
-enableCORS = false
-enableXsrfProtection = false
+enableCORS = true
+enableXsrfProtection = true
 
 [browser]
 gatherUsageStats = false
