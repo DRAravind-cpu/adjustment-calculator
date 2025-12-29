@@ -8,7 +8,7 @@ import calendar
 import hashlib
 import zipfile
 from fpdf import FPDF
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from pathlib import Path
 
 from typing import Any, Callable
@@ -417,10 +417,29 @@ def render_bpsc_calculator() -> None:
             day_int = last_day
         return datetime(year_int, month_int, day_int)
 
-    def _render_month_year_day(prefix: str, label: str) -> tuple[datetime, str]:
+    def _render_month_year_day(
+        prefix: str,
+        label: str,
+        default_month_int: int | None = None,
+        default_year_int: int | None = None,
+        disable_month_year: bool = False,
+    ) -> tuple[datetime, str, int, int]:
         now = datetime.today()
         months = list(range(1, 13))
         month_labels = [calendar.month_name[m] for m in months]
+
+        if default_month_int is None:
+            default_month_int = now.month
+        if default_year_int is None:
+            default_year_int = now.year
+
+        default_month_int = int(default_month_int)
+        if default_month_int < 1 or default_month_int > 12:
+            default_month_int = now.month
+
+        years = list(range(2000, 2101))
+        if int(default_year_int) not in years:
+            default_year_int = now.year
 
         colm, coly, cold = st.columns([2, 2, 1])
         with colm:
@@ -428,16 +447,18 @@ def render_bpsc_calculator() -> None:
                 f"{label} Month",
                 options=list(range(len(months))),
                 format_func=lambda i: month_labels[i],
-                index=max(0, now.month - 1),
+                index=max(0, int(default_month_int) - 1),
                 key=f"{prefix}_month_idx",
+                disabled=disable_month_year,
             )
             month_int = months[month_idx]
         with coly:
             year_int = st.selectbox(
                 f"{label} Year",
-                options=list(range(2000, 2101)),
-                index=list(range(2000, 2101)).index(now.year),
+                options=years,
+                index=years.index(int(default_year_int)),
                 key=f"{prefix}_year",
+                disabled=disable_month_year,
             )
         with cold:
             day_text = st.text_input(
@@ -450,7 +471,7 @@ def render_bpsc_calculator() -> None:
         day_opt = _parse_optional_day(day_text)
         dt = _build_date_from_month_year_optional_day(month_int, year_int, day_opt)
         display = dt.strftime('%d/%m/%Y')
-        return dt, display
+        return dt, display, month_int, year_int
 
     def _generate_bpsc_pdf(
         consumer_name: str,
@@ -472,8 +493,8 @@ def render_bpsc_calculator() -> None:
         pdf.cell(0, 7, f"Service Number: {service_number}", ln=True)
         pdf.ln(4)
 
-        headers = ['S.No', 'Amount', 'Due Date', 'Cutoff Date', 'Days', 'BPSC Amount', 'Total']
-        col_widths = [12, 25, 28, 28, 14, 30, 30]
+        headers = ['S.No', 'Amount', 'Bill Issued', 'Due Date', 'Cutoff Date', 'Days', 'BPSC Amount', 'Total']
+        col_widths = [10, 22, 24, 24, 24, 12, 26, 28]
 
         pdf.set_font('Arial', 'B', 10)
         for h, w in zip(headers, col_widths):
@@ -484,11 +505,12 @@ def render_bpsc_calculator() -> None:
         for r in rows:
             pdf.cell(col_widths[0], 8, str(r['sno']), border=1, align='C')
             pdf.cell(col_widths[1], 8, f"{r['amount']:.2f}", border=1, align='R')
-            pdf.cell(col_widths[2], 8, r['due_date'], border=1, align='C')
-            pdf.cell(col_widths[3], 8, r['cutoff_date'], border=1, align='C')
-            pdf.cell(col_widths[4], 8, str(r['days']), border=1, align='C')
-            pdf.cell(col_widths[5], 8, f"{r['bpsc_amount']:.2f}", border=1, align='R')
-            pdf.cell(col_widths[6], 8, f"{r['row_total']:.2f}", border=1, align='R')
+            pdf.cell(col_widths[2], 8, str(r.get('issued_date', '')), border=1, align='C')
+            pdf.cell(col_widths[3], 8, r['due_date'], border=1, align='C')
+            pdf.cell(col_widths[4], 8, r['cutoff_date'], border=1, align='C')
+            pdf.cell(col_widths[5], 8, str(r['days']), border=1, align='C')
+            pdf.cell(col_widths[6], 8, f"{r['bpsc_amount']:.2f}", border=1, align='R')
+            pdf.cell(col_widths[7], 8, f"{r['row_total']:.2f}", border=1, align='R')
             pdf.ln()
 
         pdf.ln(4)
@@ -518,7 +540,7 @@ def render_bpsc_calculator() -> None:
         thin = Side(style='thin')
         border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-        ws.merge_cells('A1:G1')
+        ws.merge_cells('A1:H1')
         ws['A1'] = 'BPSC Calculator Report'
         ws['A1'].font = title_font
         ws['A1'].alignment = Alignment(horizontal='center')
@@ -533,7 +555,7 @@ def render_bpsc_calculator() -> None:
             ws[cell].font = bold
 
         start_row = 7
-        headers = ['S.No', 'Amount', 'Due Date', 'Cutoff Date', 'Difference (Days)', 'BPSC Amount', 'Base Amount + BPSC']
+        headers = ['S.No', 'Amount', 'Bill Issued', 'Due Date', 'Cutoff Date', 'Difference (Days)', 'BPSC Amount', 'Base Amount + BPSC']
         for col_idx, header in enumerate(headers, start=1):
             cell = ws.cell(row=start_row, column=col_idx, value=header)
             cell.font = bold
@@ -545,6 +567,7 @@ def render_bpsc_calculator() -> None:
             values = [
                 r['sno'],
                 round(float(r['amount']), 2),
+                _sanitize_excel_text(str(r.get('issued_date', ''))),
                 _sanitize_excel_text(r['due_date']),
                 _sanitize_excel_text(r['cutoff_date']),
                 int(r['days']),
@@ -554,9 +577,9 @@ def render_bpsc_calculator() -> None:
             for col_idx, val in enumerate(values, start=1):
                 cell = ws.cell(row=row_num, column=col_idx, value=val)
                 cell.border = border
-                if col_idx in (1, 5):
+                if col_idx in (1, 6):
                     cell.alignment = Alignment(horizontal='center')
-                elif col_idx in (3, 4):
+                elif col_idx in (3, 4, 5):
                     cell.alignment = Alignment(horizontal='center')
                 else:
                     cell.alignment = Alignment(horizontal='right')
@@ -572,7 +595,7 @@ def render_bpsc_calculator() -> None:
             ws['A' + str(r)].font = bold
 
         # Basic column widths
-        widths = [6, 14, 14, 14, 16, 14, 18]
+        widths = [6, 14, 14, 14, 14, 16, 14, 18]
         for i, w in enumerate(widths, start=1):
             ws.column_dimensions[chr(64 + i)].width = w
 
@@ -593,8 +616,17 @@ def render_bpsc_calculator() -> None:
         st.session_state.bpsc_entries = []
     if 'bpsc_processed' not in st.session_state:
         st.session_state.bpsc_processed = False
+    if 'bpsc_next_id' not in st.session_state:
+        st.session_state.bpsc_next_id = 1
     # Do not directly mutate session_state for widget keys after instantiation.
-    # We rely on form clear_on_submit=True to reset entry inputs after adding.
+    # We avoid form clear_on_submit for date widgets (it forces defaults back).
+    if 'bpsc_clear_amount_next' not in st.session_state:
+        st.session_state.bpsc_clear_amount_next = False
+
+    # Clear amount input BEFORE the widget is created
+    if st.session_state.get('bpsc_clear_amount_next'):
+        st.session_state.pop('bpsc_amount_text', None)
+        st.session_state.bpsc_clear_amount_next = False
 
     def _parse_amount_text(amount_text: str) -> float | None:
         raw = (amount_text or "").strip()
@@ -645,66 +677,101 @@ def render_bpsc_calculator() -> None:
         st.session_state.bpsc_fixed_pct = fixed_bpsc_pct
 
     if use_fixed_cutoff:
-        fixed_cutoff_dt, fixed_cutoff_display = _render_month_year_day("bpsc_fixed_cutoff", "Cutoff Date")
+        fixed_cutoff_dt, fixed_cutoff_display, _, _ = _render_month_year_day("bpsc_fixed_cutoff", "Cutoff Date")
 
     st.subheader("Add Entry")
-    with st.form("bpsc_add_entry_form", clear_on_submit=True):
-        amount_text = st.text_input(
-            "Amount (₹)",
-            key="bpsc_amount_text",
-            help="You can paste values like 123456 or 1,23,456.00",
+
+    # NOTE: Do not place these widgets inside a `st.form`.
+    # Widgets in a form don't update interactively until submit, which makes the
+    # Due Month/Year override feel "stuck".
+    amount_text = st.text_input(
+        "Amount (₹)",
+        key="bpsc_amount_text",
+        help="You can paste values like 123456 or 1,23,456.00",
+    )
+
+    st.markdown("**Bill Issued Date**")
+    issued_dt, issued_display, issued_month_int, issued_year_int = _render_month_year_day("bpsc_issued", "Bill Issued")
+
+    # Due month/year default: immediate next month of Bill Issued.
+    # If Bill Issued month is December, Due becomes January and year increments.
+    due_auto = st.checkbox(
+        "Auto-set Due Month/Year from Bill Issued",
+        value=bool(st.session_state.get('bpsc_due_auto', True)),
+        help="Defaults Due Month to the immediate next month of Bill Issued. Uncheck to override.",
+    )
+    st.session_state.bpsc_due_auto = due_auto
+
+    due_default_month = issued_month_int + 1
+    due_default_year = issued_year_int
+    if due_default_month == 13:
+        due_default_month = 1
+        due_default_year = issued_year_int + 1
+
+    st.markdown("**Due Date**")
+    # Use separate widget keys for auto vs manual so toggling works cleanly.
+    due_prefix = (
+        f"bpsc_due_auto_{int(issued_year_int)}_{int(issued_month_int)}"
+        if due_auto
+        else "bpsc_due_manual"
+    )
+    due_dt, due_display, _, _ = _render_month_year_day(
+        due_prefix,
+        "Due",
+        default_month_int=due_default_month,
+        default_year_int=due_default_year,
+        disable_month_year=bool(due_auto),
+    )
+
+    if not use_fixed_cutoff:
+        st.markdown("**Cutoff Date**")
+        cutoff_dt, cutoff_display, _, _ = _render_month_year_day("bpsc_cutoff", "Cutoff")
+    else:
+        cutoff_dt, cutoff_display = fixed_cutoff_dt, fixed_cutoff_display
+
+    if not use_fixed_bpsc:
+        entry_bpsc_pct = st.number_input(
+            "BPSC Percentage (%)",
+            min_value=0.0,
+            value=0.0,
+            step=0.01,
+            format="%.4f",
         )
-        st.markdown("**Bill Issued Date**")
-        issued_dt, issued_display = _render_month_year_day("bpsc_issued", "Bill Issued")
-        st.markdown("**Due Date**")
-        due_dt, due_display = _render_month_year_day("bpsc_due", "Due")
+    else:
+        entry_bpsc_pct = float(fixed_bpsc_pct or 0.0)
 
-        if not use_fixed_cutoff:
-            st.markdown("**Cutoff Date**")
-            cutoff_dt, cutoff_display = _render_month_year_day("bpsc_cutoff", "Cutoff")
+    add_clicked = st.button("Add", type="primary")
+    if add_clicked:
+        parsed_amount = _parse_amount_text(amount_text)
+        if not consumer_name.strip() or not service_number.strip():
+            st.error("Please enter Consumer Name and Service Number before adding entries.")
+        elif parsed_amount is None:
+            st.error("Please enter a valid Amount (non-negative number).")
+        elif cutoff_dt is None or due_dt is None:
+            st.error("Please provide valid Due Date and Cutoff Date.")
+        elif cutoff_dt < due_dt:
+            st.error("Cutoff Date must be on or after Due Date.")
         else:
-            cutoff_dt, cutoff_display = fixed_cutoff_dt, fixed_cutoff_display
-
-        if not use_fixed_bpsc:
-            entry_bpsc_pct = st.number_input(
-                "BPSC Percentage (%)",
-                min_value=0.0,
-                value=0.0,
-                step=0.01,
-                format="%.4f",
+            days = (cutoff_dt - due_dt).days + 1
+            bpsc_amount = (float(parsed_amount) * float(entry_bpsc_pct) / 100.0 / 30.0) * float(days)
+            row_total = float(parsed_amount) + float(bpsc_amount)
+            st.session_state.bpsc_entries.append(
+                {
+                    "id": int(st.session_state.bpsc_next_id),
+                    "amount": float(parsed_amount),
+                    "bpsc_pct": float(entry_bpsc_pct),
+                    "issued_date": issued_display,
+                    "due_date": due_display,
+                    "cutoff_date": cutoff_display,
+                    "days": int(days),
+                    "bpsc_amount": float(bpsc_amount),
+                    "row_total": float(row_total),
+                }
             )
-        else:
-            entry_bpsc_pct = float(fixed_bpsc_pct or 0.0)
-
-        add_clicked = st.form_submit_button("Add")
-        if add_clicked:
-            parsed_amount = _parse_amount_text(amount_text)
-            if not consumer_name.strip() or not service_number.strip():
-                st.error("Please enter Consumer Name and Service Number before adding entries.")
-            elif parsed_amount is None:
-                st.error("Please enter a valid Amount (non-negative number).")
-            elif cutoff_dt is None or due_dt is None:
-                st.error("Please provide valid Due Date and Cutoff Date.")
-            elif cutoff_dt < due_dt:
-                st.error("Cutoff Date must be on or after Due Date.")
-            else:
-                days = (cutoff_dt - due_dt).days + 1
-                bpsc_amount = (float(parsed_amount) * float(entry_bpsc_pct) / 100.0 / 30.0) * float(days)
-                row_total = float(parsed_amount) + float(bpsc_amount)
-                st.session_state.bpsc_entries.append(
-                    {
-                        "amount": float(parsed_amount),
-                        "bpsc_pct": float(entry_bpsc_pct),
-                        "issued_date": issued_display,
-                        "due_date": due_display,
-                        "cutoff_date": cutoff_display,
-                        "days": int(days),
-                        "bpsc_amount": float(bpsc_amount),
-                        "row_total": float(row_total),
-                    }
-                )
-                st.session_state.bpsc_processed = False
-                st.success("Entry added.")
+            st.session_state.bpsc_next_id = int(st.session_state.bpsc_next_id) + 1
+            st.session_state.bpsc_processed = False
+            st.session_state.bpsc_clear_amount_next = True
+            st.success("Entry added.")
 
     actions_col1, actions_col2 = st.columns([1, 2])
     with actions_col1:
@@ -713,47 +780,158 @@ def render_bpsc_calculator() -> None:
             st.session_state.bpsc_processed = False
             st.success("All entries cleared.")
 
-    process_disabled = len(st.session_state.bpsc_entries) == 0
-    if st.button("Process", type="primary", disabled=process_disabled):
-        st.session_state.bpsc_processed = True
-
-    if not st.session_state.bpsc_processed:
+    if not st.session_state.bpsc_entries:
         return
 
-    # Build output table
+    def _parse_ddmmyyyy(date_text: str) -> datetime:
+        cleaned = (date_text or '').strip().replace('-', '/')
+        return datetime.strptime(cleaned, '%d/%m/%Y')
+
+    # Ensure every entry has a stable id (migration for old session state)
+    max_seen = 0
+    for entry in st.session_state.bpsc_entries:
+        if 'id' not in entry:
+            entry['id'] = int(st.session_state.bpsc_next_id)
+            st.session_state.bpsc_next_id = int(st.session_state.bpsc_next_id) + 1
+        max_seen = max(max_seen, int(entry.get('id', 0)))
+    if int(st.session_state.bpsc_next_id) <= max_seen:
+        st.session_state.bpsc_next_id = max_seen + 1
+
+    # Build editable view model
+    fixed_cutoff_date = fixed_cutoff_dt.date() if (use_fixed_cutoff and fixed_cutoff_dt is not None) else None
+    due_rows = []
+    for entry in st.session_state.bpsc_entries:
+        try:
+            due_date = _parse_ddmmyyyy(entry.get('due_date', '01/01/2000')).date()
+        except Exception:
+            due_date = datetime(2000, 1, 1).date()
+        try:
+            cutoff_date = _parse_ddmmyyyy(entry.get('cutoff_date', '01/01/2000')).date()
+        except Exception:
+            cutoff_date = datetime(2000, 1, 1).date()
+        if fixed_cutoff_date is not None:
+            cutoff_date = fixed_cutoff_date
+        due_rows.append(
+            {
+                "_id": int(entry['id']),
+                "Amount": float(entry.get('amount', 0.0) or 0.0),
+                "Due Date": due_date,
+                "Cutoff Date": cutoff_date,
+                "Remove": False,
+            }
+        )
+
+    editor_df = pd.DataFrame(due_rows).set_index('_id')
+    editor_df = editor_df.sort_values(by=["Due Date", "Cutoff Date"], ascending=True)
+
+    st.subheader("Result")
+    edited_df = st.data_editor(
+        editor_df,
+        hide_index=True,
+        width='stretch',
+        column_config={
+            "Amount": st.column_config.NumberColumn(format="%.2f", step=1.0, min_value=0.0),
+            "Due Date": st.column_config.DateColumn(format="DD/MM/YYYY"),
+            "Cutoff Date": st.column_config.DateColumn(format="DD/MM/YYYY"),
+            "Remove": st.column_config.CheckboxColumn(help="Tick to remove this row"),
+        },
+        disabled=["Cutoff Date"],
+        key="bpsc_editor",
+    )
+
+    reprocess_clicked = st.button("Reprocess", type="secondary")
+    if reprocess_clicked:
+        # Apply edits back into session_state entries ONLY when explicitly requested.
+        entries_by_id = {int(e['id']): e for e in st.session_state.bpsc_entries}
+        new_entries = []
+
+        fixed_pct_value = float(fixed_bpsc_pct or 0.0) if use_fixed_bpsc else None
+
+        for row_id, row in edited_df.iterrows():
+            row_id = int(row_id)
+            entry = entries_by_id.get(row_id)
+            if entry is None:
+                continue
+
+            if bool(row.get('Remove', False)):
+                continue
+
+            amount_val = float(row.get('Amount', 0.0) or 0.0)
+            due_date_val = row.get('Due Date')
+            cutoff_date_val = row.get('Cutoff Date')
+
+            # Normalize date types (Streamlit DateColumn returns `datetime.date`)
+            if isinstance(due_date_val, datetime):
+                due_date_date = due_date_val.date()
+            elif isinstance(due_date_val, date):
+                due_date_date = due_date_val
+            else:
+                try:
+                    due_date_date = _parse_ddmmyyyy(str(due_date_val)).date()
+                except Exception:
+                    due_date_date = datetime(2000, 1, 1).date()
+
+            if fixed_cutoff_date is not None:
+                cutoff_date_date = fixed_cutoff_date
+            else:
+                if isinstance(cutoff_date_val, datetime):
+                    cutoff_date_date = cutoff_date_val.date()
+                elif isinstance(cutoff_date_val, date):
+                    cutoff_date_date = cutoff_date_val
+                else:
+                    try:
+                        cutoff_date_date = _parse_ddmmyyyy(str(cutoff_date_val)).date()
+                    except Exception:
+                        cutoff_date_date = datetime(2000, 1, 1).date()
+
+            entry['amount'] = amount_val
+            entry['due_date'] = due_date_date.strftime('%d/%m/%Y')
+            entry['cutoff_date'] = cutoff_date_date.strftime('%d/%m/%Y')
+
+            calc_pct = float(entry.get('bpsc_pct', 0.0) or 0.0)
+            if fixed_pct_value is not None:
+                calc_pct = fixed_pct_value
+                entry['bpsc_pct'] = calc_pct
+
+            if cutoff_date_date < due_date_date:
+                days_val = 0
+            else:
+                days_val = (cutoff_date_date - due_date_date).days + 1
+
+            bpsc_amount_val = (amount_val * calc_pct / 100.0 / 30.0) * float(days_val)
+            row_total_val = amount_val + bpsc_amount_val
+
+            entry['days'] = int(days_val)
+            entry['bpsc_amount'] = float(bpsc_amount_val)
+            entry['row_total'] = float(row_total_val)
+
+            new_entries.append(entry)
+
+        def _safe_due_dt(e: dict[str, Any]) -> datetime:
+            try:
+                return _parse_ddmmyyyy(e.get('due_date', '01/01/2000'))
+            except Exception:
+                return datetime(2000, 1, 1)
+
+        st.session_state.bpsc_entries = sorted(new_entries, key=lambda e: (_safe_due_dt(e), int(e.get('id', 0))))
+        st.rerun()
+
+    # Build output table for downloads (sorted already)
     rows_for_table: list[dict[str, Any]] = []
     for idx, entry in enumerate(st.session_state.bpsc_entries, start=1):
         rows_for_table.append(
             {
                 "sno": idx,
-                "amount": entry["amount"],
-                "due_date": entry["due_date"],
-                "cutoff_date": entry["cutoff_date"],
-                "days": entry["days"],
-                "bpsc_amount": entry["bpsc_amount"],
-                "row_total": entry["row_total"],
-                # Keep issued date for exports/details (not requested as a table column)
+                "amount": float(entry.get("amount", 0.0) or 0.0),
+                "due_date": entry.get("due_date", ""),
+                "cutoff_date": entry.get("cutoff_date", ""),
+                "days": int(entry.get("days", 0) or 0),
+                "bpsc_amount": float(entry.get("bpsc_amount", 0.0) or 0.0),
+                "row_total": float(entry.get("row_total", 0.0) or 0.0),
                 "issued_date": entry.get("issued_date", ""),
-                "bpsc_pct": entry.get("bpsc_pct", 0.0),
+                "bpsc_pct": float(entry.get("bpsc_pct", 0.0) or 0.0),
             }
         )
-
-    st.subheader("Result")
-    display_df = pd.DataFrame(
-        [
-            {
-                "S.No": r["sno"],
-                "Amount": round(r["amount"], 2),
-                "Due Date": r["due_date"],
-                "Cutoff Date": r["cutoff_date"],
-                "Difference (Days)": r["days"],
-                "BPSC Amount": round(r["bpsc_amount"], 2),
-                "Base Amount + BPSC": round(r["row_total"], 2),
-            }
-            for r in rows_for_table
-        ]
-    )
-    st.dataframe(display_df, use_container_width=True)
 
     total_base = sum(r["amount"] for r in rows_for_table)
     total_bpsc = sum(r["bpsc_amount"] for r in rows_for_table)
