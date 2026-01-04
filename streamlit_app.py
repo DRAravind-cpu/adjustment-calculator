@@ -10,6 +10,9 @@ import zipfile
 from fpdf import FPDF
 from datetime import datetime, timedelta, date
 from pathlib import Path
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+import bisect
+import sys
 
 from typing import Any, Callable
 
@@ -983,10 +986,612 @@ def render_bpsc_calculator() -> None:
         )
 
 
+def _to_cents(value: Any) -> int | None:
+    """Convert a value to integer cents (2-decimal, half-up). Returns None if not numeric."""
+    if value is None:
+        return None
+    # Handle pandas/numpy NaN
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    if isinstance(value, str):
+        text = value.strip().replace(",", "")
+        if not text:
+            return None
+    else:
+        text = str(value)
+    try:
+        dec = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+    # Guard against Decimal('NaN') / Infinity
+    try:
+        if not dec.is_finite():
+            return None
+    except Exception:
+        return None
+    dec = dec.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    try:
+        if not dec.is_finite():
+            return None
+    except Exception:
+        return None
+    return int(dec * 100)
+
+
+def _subset_solutions_meet_in_middle(values_cents: list[int], target_cents: int, max_solutions: int = 10) -> list[list[int]]:
+    """Find up to `max_solutions` subsets whose sum equals `target_cents`.
+
+    Returns a list of solutions; each solution is a list of indices into `values_cents`.
+    Uses meet-in-the-middle; suitable for n up to ~40.
+    """
+    n = len(values_cents)
+    if n == 0:
+        return []
+
+    mid = n // 2
+    left_vals = values_cents[:mid]
+    right_vals = values_cents[mid:]
+
+    left: list[tuple[int, int]] = [(0, 0)]  # (sum, mask)
+    for i, v in enumerate(left_vals):
+        left += [(s + v, mask | (1 << i)) for (s, mask) in left]
+
+    right: list[tuple[int, int]] = [(0, 0)]
+    for i, v in enumerate(right_vals):
+        right += [(s + v, mask | (1 << i)) for (s, mask) in right]
+
+    right.sort(key=lambda x: x[0])
+    right_sums = [s for (s, _) in right]
+
+    solutions: list[list[int]] = []
+    for left_sum, left_mask in left:
+        needed = target_cents - left_sum
+        lo = bisect.bisect_left(right_sums, needed)
+        hi = bisect.bisect_right(right_sums, needed)
+        if lo == hi:
+            continue
+
+        for _, right_mask in right[lo:hi]:
+            if left_mask == 0 and right_mask == 0:
+                continue
+
+            idxs: list[int] = []
+            for i in range(len(left_vals)):
+                if left_mask & (1 << i):
+                    idxs.append(i)
+            for i in range(len(right_vals)):
+                if right_mask & (1 << i):
+                    idxs.append(mid + i)
+
+            solutions.append(idxs)
+            if len(solutions) >= max_solutions:
+                return solutions
+
+    return solutions
+
+
+def _subset_solutions_dp_positive(values_cents: list[int], target_cents: int, max_solutions: int = 10) -> list[list[int]]:
+    """DP subset-sum for non-negative ints; returns up to `max_solutions` solutions.
+
+    This considers the full list of rows (not a row-count-limited window), but
+    the number of solutions returned is capped to keep output practical.
+    """
+    if target_cents < 0:
+        return []
+    if target_cents == 0:
+        # Avoid enumerating infinite-like combinations (especially with zeros).
+        # Return the first zero-value row as a minimal non-empty solution, if any.
+        for idx, v in enumerate(values_cents):
+            if v == 0:
+                return [[idx]]
+        return []
+
+    # dp[sum] -> list of tuples of indices that create that sum
+    dp: dict[int, list[tuple[int, ...]]] = {0: [tuple()]}
+
+    for idx, v in enumerate(values_cents):
+        if v < 0:
+            # Not supported by this DP variant.
+            return []
+        if v == 0:
+            # Skip zeros to prevent combinatorial explosion; they do not help reach a positive target.
+            continue
+        if v > target_cents:
+            continue
+
+        current_sums = list(dp.keys())
+        for s in current_sums:
+            new_sum = s + v
+            if new_sum > target_cents:
+                continue
+            existing_paths = dp.get(s, [])
+            if not existing_paths:
+                continue
+
+            bucket = dp.setdefault(new_sum, [])
+            if len(bucket) >= max_solutions:
+                continue
+
+            remaining = max_solutions - len(bucket)
+            for path in existing_paths[:remaining]:
+                bucket.append(path + (idx,))
+
+        if len(dp.get(target_cents, [])) >= max_solutions:
+            break
+
+    return [list(p) for p in dp.get(target_cents, []) if p]
+
+
+def _subset_value_patterns_backtrack(
+    value_to_row_indexes: dict[int, list[int]],
+    target_cents: int,
+    max_patterns: int = 100,
+) -> list[dict[int, int]]:
+    """Find unique solutions as value-count patterns (treating duplicates as interchangeable).
+
+    Returns list of patterns: {value_cents: count_used}.
+    This avoids generating multiple equivalent combinations when the sheet has
+    duplicate numeric values.
+    """
+    if target_cents <= 0:
+        return []
+
+    items: list[tuple[int, int]] = []  # (value_cents, available_count)
+    for v, rows in value_to_row_indexes.items():
+        if v <= 0:
+            continue
+        items.append((v, len(rows)))
+
+    # Heuristic: large values first improves pruning.
+    items.sort(key=lambda x: x[0], reverse=True)
+
+    patterns: list[dict[int, int]] = []
+    no_solution: set[tuple[int, int]] = set()
+
+    def dfs(i: int, remaining: int, current: dict[int, int]) -> bool:
+        if len(patterns) >= max_patterns:
+            return True
+        if remaining == 0:
+            patterns.append(current.copy())
+            return len(patterns) >= max_patterns
+        if i >= len(items) or remaining < 0:
+            return False
+        state = (i, remaining)
+        if state in no_solution:
+            return False
+
+        value, avail = items[i]
+        max_take = min(avail, remaining // value)
+        # Try higher counts first to reach target faster.
+        for take in range(max_take, -1, -1):
+            if take:
+                current[value] = take
+            else:
+                current.pop(value, None)
+            done = dfs(i + 1, remaining - take * value, current)
+            if done:
+                return True
+
+        no_solution.add(state)
+        return False
+
+    dfs(0, target_cents, {})
+    return patterns
+
+
+def _subset_first_value_pattern_memo(
+    value_to_row_indexes: dict[int, list[int]],
+    target_cents: int,
+) -> dict[int, int] | None:
+    """Return a single exact solution as a value->count pattern.
+
+    This mirrors the user's desired behavior: find *one* exact combination and
+    stop, which avoids printing many equivalent possibilities when duplicates
+    exist.
+    """
+    if target_cents <= 0:
+        return None
+
+    counts: dict[int, int] = {}
+    for v, rows in value_to_row_indexes.items():
+        if v <= 0:
+            continue
+        counts[v] = len(rows)
+
+    if not counts:
+        return None
+
+    unique_vals = sorted(counts.keys(), reverse=True)
+    # Ensure recursion depth is sufficient for large unique value sets.
+    sys.setrecursionlimit(max(5000, len(unique_vals) + 200))
+
+    memo: dict[tuple[int, int], dict[int, int] | None] = {}
+
+    def solve(remaining: int, idx: int) -> dict[int, int] | None:
+        if remaining == 0:
+            return {}
+        if remaining < 0 or idx >= len(unique_vals):
+            return None
+
+        state = (remaining, idx)
+        if state in memo:
+            return memo[state]
+
+        val = unique_vals[idx]
+        max_count = min(counts[val], remaining // val)
+
+        for take in range(max_count, -1, -1):
+            res = solve(remaining - take * val, idx + 1)
+            if res is not None:
+                out = dict(res)
+                if take > 0:
+                    out[val] = take
+                memo[state] = out
+                return out
+
+        memo[state] = None
+        return None
+
+    return solve(target_cents, 0)
+
+
+def _find_subset_solutions(values_cents: list[int], target_cents: int, max_solutions: int = 10) -> list[list[int]]:
+    """Find subsets that sum to target.
+
+    - For small n, meet-in-the-middle is fast.
+    - For larger n (entire column), use DP for non-negative values.
+    """
+    n = len(values_cents)
+    if n == 0:
+        return []
+
+    # Fast path for small inputs.
+    if n <= 44:
+        return _subset_solutions_meet_in_middle(values_cents, target_cents, max_solutions=max_solutions)
+
+    # DP supports non-negative integers. Most billing/amount sheets are non-negative.
+    if any(v < 0 for v in values_cents):
+        return []
+    return _subset_solutions_dp_positive(values_cents, target_cents, max_solutions=max_solutions)
+
+
+def render_subset_calculator() -> None:
+    st.title("Subset Calculator")
+    st.caption("Upload an Excel sheet and find row combinations whose numeric values sum to the target.")
+
+    # Allows us to programmatically reset the file uploader.
+    if "subset_upload_nonce" not in st.session_state:
+        st.session_state["subset_upload_nonce"] = 0
+
+    # Refresh button: clears inputs/results without a browser refresh.
+    if st.button("Refresh", key="subset_refresh", type="secondary"):
+        st.session_state["subset_upload_nonce"] = int(st.session_state.get("subset_upload_nonce", 0)) + 1
+        for k in list(st.session_state.keys()):
+            if k.startswith("subset_") and k != "subset_upload_nonce":
+                st.session_state.pop(k, None)
+        st.rerun()
+
+    uploaded = st.file_uploader(
+        "Upload Excel file",
+        type=["xlsx", "xls"],
+        accept_multiple_files=False,
+        key=f"subset_excel_upload_{st.session_state['subset_upload_nonce']}",
+    )
+
+    mode_col1, mode_col2 = st.columns([2, 1])
+    with mode_col1:
+        solution_mode = st.radio(
+            "Search Mode",
+            options=["Find only one solution", "Find up to N solutions"],
+            index=0,
+            horizontal=True,
+            key="subset_solution_mode",
+        )
+    with mode_col2:
+        max_solutions = st.number_input(
+            "N",
+            min_value=1,
+            value=10,
+            step=1,
+            disabled=(solution_mode != "Find up to N solutions"),
+            key="subset_max_solutions",
+        )
+
+    col_b, col_c = st.columns(2)
+    with col_b:
+        value_col_num = st.number_input(
+            "Column number for numerical value (1-based)",
+            min_value=1,
+            value=2,
+            step=1,
+            key="subset_value_col",
+        )
+    with col_c:
+        target_value = st.number_input(
+            "Target numerical value",
+            value=0.00,
+            step=0.01,
+            format="%.2f",
+            key="subset_target",
+        )
+
+    if uploaded is None:
+        st.info("Upload an Excel file to begin.")
+        return
+
+    # Reset stored results when inputs change
+    try:
+        file_sig = hashlib.md5(uploaded.getvalue()).hexdigest()
+    except Exception:
+        file_sig = str(getattr(uploaded, "name", "uploaded"))
+    ctx_key = f"{file_sig}|col={int(value_col_num)}|target={float(target_value):.2f}"
+    if st.session_state.get("subset_ctx_key") != ctx_key:
+        st.session_state["subset_ctx_key"] = ctx_key
+        st.session_state.pop("subset_last_patterns", None)
+        st.session_state.pop("subset_last_message", None)
+        st.session_state.pop("subset_excluded_rows", None)
+
+    try:
+        df = pd.read_excel(uploaded)
+    except Exception as e:
+        st.error(f"Failed to read Excel file: {e}")
+        return
+
+    # Permanent fix: convert Excel serial dates to dd/mm/yyyy (only for columns whose name contains 'date').
+    if not df.empty:
+        def _maybe_fix_excel_serial_date_column(col_name: str, series: pd.Series) -> pd.Series:
+            if series.dtype.kind not in ("i", "u", "f"):
+                return series
+
+            # Only apply to likely date columns to avoid corrupting numeric data.
+            name = str(col_name).strip().lower()
+            if "date" not in name:
+                return series
+
+            non_null = series.dropna()
+            if non_null.empty:
+                return series
+
+            sample = non_null.head(200)
+            # Candidate Excel serial dates are typically ~ 20000..60000 for modern years.
+            # Also ensure values are near-integers.
+            near_int = (sample - sample.round()).abs() < 1e-9
+            in_range = (sample >= 20000) & (sample <= 60000)
+            if float((near_int & in_range).mean()) < 0.8:
+                return series
+
+            dt = pd.to_datetime(series, unit="D", origin="1899-12-30", errors="coerce")
+            if dt.notna().sum() == 0:
+                return series
+            return dt.dt.strftime("%d/%m/%Y")
+
+        df = df.copy()
+        for c in df.columns:
+            df[c] = _maybe_fix_excel_serial_date_column(c, df[c])
+
+    if df.empty:
+        st.error("Excel file has no rows.")
+        return
+
+    st.subheader("Preview")
+    st.dataframe(df.head(20), use_container_width=True)
+
+    num_cols = df.shape[1]
+    value_idx = int(value_col_num) - 1
+    if value_idx < 0 or value_idx >= num_cols:
+        st.error(f"Invalid numeric column number. File has {num_cols} columns.")
+        return
+
+    target_cents = _to_cents(target_value)
+    if target_cents is None:
+        st.error("Target value must be numeric.")
+        return
+
+    value_col_name = df.columns[value_idx]
+
+    # Build a mapping from numeric value -> row indexes (to treat duplicates as interchangeable)
+    value_to_rows: dict[int, list[int]] = {}
+    negatives_found = False
+    for row_i, raw in enumerate(df.iloc[:, value_idx].tolist()):
+        cents = _to_cents(raw)
+        if cents is None:
+            continue
+        if cents < 0:
+            negatives_found = True
+        value_to_rows.setdefault(cents, []).append(row_i)
+
+    if not value_to_rows:
+        st.error(f"No numeric values found in column {value_col_num} ({value_col_name}).")
+        return
+
+    if negatives_found:
+        st.warning("Negative values were found in the numeric column. The subset solver currently ignores negative/zero values for combination search.")
+
+    numeric_row_count = sum(len(v) for v in value_to_rows.values())
+    if numeric_row_count > 44:
+        st.warning(
+            f"Found {numeric_row_count} numeric rows. Searching the entire column can take longer, especially if many values can combine to the target."
+        )
+
+    button_label = "Find combination" if solution_mode == "Find only one solution" else "Find combinations"
+    find_clicked = st.button(button_label, type="primary", key="subset_find")
+    if find_clicked:
+        with st.spinner("Searching combinations..."):
+            if solution_mode == "Find only one solution":
+                patterns: list[dict[int, int]] = []
+                single = _subset_first_value_pattern_memo(value_to_rows, target_cents)
+                if single:
+                    patterns = [single]
+            else:
+                patterns = _subset_value_patterns_backtrack(value_to_rows, target_cents, max_patterns=int(max_solutions))
+
+        if not patterns:
+            st.session_state["subset_last_patterns"] = []
+            st.session_state["subset_last_message"] = "No exact combination found for the target value."
+        else:
+            st.session_state["subset_last_patterns"] = patterns
+            st.session_state["subset_last_message"] = None
+            st.session_state.pop("subset_excluded_rows", None)
+
+    patterns = st.session_state.get("subset_last_patterns")
+    last_message = st.session_state.get("subset_last_message")
+    if last_message:
+        st.error(last_message)
+        return
+    if not patterns:
+        return
+
+    if solution_mode == "Find only one solution" and len(patterns) == 1:
+        st.success(f"Exact combination found for {target_value:,.2f}.")
+    else:
+        st.success(f"Found {len(patterns)} unique combination pattern(s) matching {target_value:,.2f}.")
+
+    def _format_money(cents: int) -> str:
+        return f"{(Decimal(cents) / Decimal(100)):,.2f}"
+
+    rendered: list[tuple[pd.DataFrame, pd.DataFrame]] = []
+    for sol_idx, pattern in enumerate(patterns, start=1):
+        # Choose representative rows for each value (first N rows for that value)
+        selected_indexes: list[int] = []
+        replaceable_values: set[int] = set()
+        for value_cents, count_used in pattern.items():
+            rows_for_value = sorted(value_to_rows.get(value_cents, []))
+            if len(rows_for_value) > count_used:
+                replaceable_values.add(value_cents)
+            selected_indexes.extend(rows_for_value[:count_used])
+
+        # Classify and order selected rows: irreplaceable first, then replaceable
+        ordered_selected: list[tuple[int, int]] = []  # (category, row_index)
+        for row_index in sorted(selected_indexes):
+            row_value = _to_cents(df.iloc[row_index, value_idx])
+            category = 1 if (row_value in replaceable_values) else 0
+            ordered_selected.append((category, row_index))
+        ordered_selected.sort(key=lambda x: (x[0], x[1]))
+        selected_row_indexes = [ri for (_, ri) in ordered_selected]
+
+        selected_df = df.iloc[selected_row_indexes].copy()
+
+        # Alternatives: other rows with the same value that could substitute
+        alt_rows: list[pd.DataFrame] = []
+        for value_cents in sorted(replaceable_values, reverse=True):
+            rows_all = sorted(value_to_rows.get(value_cents, []))
+            used_count = pattern.get(value_cents, 0)
+            used_set = set(rows_all[:used_count])
+            others = [r for r in rows_all if r not in used_set]
+            if not others:
+                continue
+            alt_df = df.iloc[others].copy()
+            alt_df.insert(0, "Alternative_For_Value", _format_money(value_cents))
+            alt_rows.append(alt_df)
+        alternatives_df = pd.concat(alt_rows, ignore_index=True) if alt_rows else pd.DataFrame()
+
+        sum_cents = sum(v * c for v, c in pattern.items())
+        sum_value = float(Decimal(sum_cents) / Decimal(100))
+        title = "Solution" if len(patterns) == 1 else f"Solution {sol_idx}"
+        st.subheader(f"{title} (Sum: {sum_value:,.2f})")
+        st.caption("Irreplaceable rows shown first; replaceable (duplicate-value) rows after.")
+        st.dataframe(selected_df, use_container_width=True)
+
+        # In single-solution mode, allow user to exclude selected rows and re-analyse for another possibility.
+        if solution_mode == "Find only one solution" and len(patterns) == 1:
+            excluded_set = set(st.session_state.get("subset_excluded_rows", []) or [])
+            editor_df = selected_df.copy()
+            editor_df.insert(0, "Exclude_Next_Search", editor_df.index.to_series().apply(lambda i: i in excluded_set))
+            st.caption("Tick rows to exclude, then click 'Find another possibility'.")
+            edited = st.data_editor(
+                editor_df,
+                use_container_width=True,
+                key="subset_selected_editor",
+                disabled=False,
+            )
+            try:
+                new_excluded = edited.index[edited["Exclude_Next_Search"] == True].tolist()  # noqa: E712
+            except Exception:
+                new_excluded = []
+            st.session_state["subset_excluded_rows"] = new_excluded
+
+            reanalyse_clicked = st.button("Find another possibility", key="subset_reanalyse")
+            if reanalyse_clicked:
+                with st.spinner("Re-analysing with your selection..."):
+                    filtered: dict[int, list[int]] = {}
+                    excluded = set(st.session_state.get("subset_excluded_rows", []) or [])
+                    for v, rows in value_to_rows.items():
+                        kept = [r for r in rows if r not in excluded]
+                        if kept:
+                            filtered[v] = kept
+
+                    current_pattern = patterns[0]
+
+                    # First attempt: find a (possibly) new solution under exclusions.
+                    candidate = _subset_first_value_pattern_memo(filtered, target_cents)
+                    next_pattern: dict[int, int] | None = None
+                    if candidate and candidate != current_pattern:
+                        next_pattern = candidate
+                    else:
+                        # If exclusions are empty or candidate matches current, try to find the next distinct pattern.
+                        try_patterns = _subset_value_patterns_backtrack(filtered, target_cents, max_patterns=25)
+                        for p in try_patterns:
+                            if p != current_pattern:
+                                next_pattern = p
+                                break
+
+                    if next_pattern:
+                        st.session_state["subset_last_patterns"] = [next_pattern]
+                        st.session_state["subset_last_message"] = None
+                        st.session_state.pop("subset_excluded_rows", None)
+                        st.rerun()
+                    else:
+                        st.info("No other possible outcome based on your selection. Showing the same solution.")
+
+            if not alternatives_df.empty:
+                st.caption("Replaceable rows (alternatives for duplicate values used in the solution)")
+                st.dataframe(alternatives_df, use_container_width=True)
+
+            rendered.append((selected_df, alternatives_df))
+
+    # Build downloadable Excel: one sheet per solution, with alternatives placed below selected rows
+    output = io.BytesIO()
+    try:
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            for sol_idx, (sel_df, alt_df) in enumerate(rendered, start=1):
+                sheet_name = f"Solution_{sol_idx}"[:31]
+
+                cols: list[str] = list(sel_df.columns)
+                for c in list(alt_df.columns):
+                    if c not in cols:
+                        cols.append(c)
+
+                sel_out = sel_df.reindex(columns=cols)
+                if alt_df.empty:
+                    sheet_df = sel_out
+                else:
+                    alt_out = alt_df.reindex(columns=cols)
+                    blank_row = pd.DataFrame([{c: None for c in cols}])
+                    label_row = pd.DataFrame([{cols[0]: "ALTERNATIVES (REPLACEABLE ROWS)"}], columns=cols)
+                    sheet_df = pd.concat([sel_out, blank_row, label_row, alt_out], ignore_index=True)
+
+                sheet_df.to_excel(writer, index=False, sheet_name=sheet_name)
+        output.seek(0)
+    except Exception as e:
+        st.error(f"Failed to generate Excel output: {e}")
+        return
+
+    st.download_button(
+        label="Download Excel Output",
+        data=output.getvalue(),
+        file_name="subset_calculator_output.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="secondary",
+    )
+
+
 # Sidebar navigation
 selected_app = st.sidebar.radio(
     "Select Calculator",
-    options=["Energy Adjustment Calculator", "BPSC Calculator"],
+    options=["Energy Adjustment Calculator", "BPSC Calculator", "Subset Calculator"],
     index=0,
 )
 
@@ -996,6 +1601,12 @@ if selected_app == "BPSC Calculator":
     render_auto_update_sidebar()
     render_bpsc_calculator()
     render_footer("BPSC Calculator - Streamlit Version")
+    st.stop()
+
+if selected_app == "Subset Calculator":
+    render_auto_update_sidebar()
+    render_subset_calculator()
+    render_footer("Subset Calculator - Streamlit Version")
     st.stop()
 
 # Title and author
